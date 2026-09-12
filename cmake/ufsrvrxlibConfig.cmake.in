@@ -1,0 +1,19 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(uflib)
+
+include("${CMAKE_CURRENT_LIST_DIR}/ufsrvrxlibTargets.cmake")
+
+# Create canonical alias ufsrvrxlib::ufsrvrxlib — resolves to whichever target was built.
+# BUILD_SHARED_LIBS=ON  → ufsrvrxlib::ufsrvrxlib_shared (preferred, dynamic linking)
+# BUILD_SHARED_LIBS=OFF → ufsrvrxlib::ufsrvrxlib_static
+if(NOT TARGET ufsrvrxlib::ufsrvrxlib)
+    if(TARGET ufsrvrxlib::ufsrvrxlib_shared)
+        add_library(ufsrvrxlib::ufsrvrxlib ALIAS ufsrvrxlib::ufsrvrxlib_shared)
+    elseif(TARGET ufsrvrxlib::ufsrvrxlib_static)
+        add_library(ufsrvrxlib::ufsrvrxlib ALIAS ufsrvrxlib::ufsrvrxlib_static)
+    else()
+        message(FATAL_ERROR "Neither ufsrvrxlib::ufsrvrxlib_shared nor ufsrvrxlib::ufsrvrxlib_static found in ufsrvrxlibTargets.cmake")
+    endif()
+endif()

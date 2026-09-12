@@ -1,0 +1,7 @@
+* text=auto
+*.sh text eol=lf
+
+# ── tig→github mirror control files: force LF regardless of core.autocrlf ──
+devops/git_mirror_exclusions.txt                text eol=lf
+devops/git_last_mirror_commit_ids_registry.txt  text eol=lf
+devops/*.sh                                      text eol=lf

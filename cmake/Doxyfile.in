@@ -1,0 +1,9 @@
+PROJECT_NAME           = "ufsrvrxlib"
+OUTPUT_DIRECTORY       = @DOXYGEN_OUTPUT_DIR@
+INPUT                  = @CMAKE_CURRENT_SOURCE_DIR@/src
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h *.c
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HAVE_DOT               = NO
+OPTIMIZE_OUTPUT_FOR_C  = YES

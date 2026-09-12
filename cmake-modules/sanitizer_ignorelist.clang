@@ -1,0 +1,32 @@
+#https://clang.llvm.org/docs/SanitizerSpecialCaseList.html
+#--fsanitize-ignorelist=sanitizer_ignorelist.clang
+# Turn off checks for the source file (use absolute path or path relative
+# to the current working directory):
+#src:/path/to/source/file.c
+
+# Turn off checks for this main file, including files included by it.
+# Useful when the main file instead of an included file should be ignored.
+# mainfile is similar to applying -fno-sanitize= to a set of files but does not need plumbing into the build system. This works well for internal linkage functions but has a caveat for C++ vague linkage functions.
+#mainfile:file.c
+
+# Turn off checks for a particular functions (use mangled names):
+#fun:MyFooBar
+
+# Extended regular expressions are supported:
+#fun:bad_(foo|bar)
+#src:bad_source[1-9].c
+# Shell like usage of * is supported (* is treated as .*):
+#src:bad/sources/*
+#fun:*BadFunction*
+
+# Specific sanitizer tools may introduce categories.
+#src:/special/path/*=special_sources
+
+# Sections can be used to limit ignorelist entries to specific sanitizers
+#[address]
+#fun:*BadASanFunc*
+
+# Section names are regular expressions
+#[cfi-vcall|cfi-icall]
+#fun:*BadCfiCall
+# Entries without sections are placed into [*] and apply to all sanitizers
