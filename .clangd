@@ -1,0 +1,18 @@
+# Point clangd at the CMake-generated compile database so it applies the same
+# per-file flags as the build. We use the *test* build's database (not build/dev)
+# because build/dev is configured with tests OFF and therefore has no entries for
+# tests/*.cpp — clangd would otherwise fail to resolve <gtest/gtest.h>. The test
+# build covers both the library .c files (with -include stdatomic.h → Clang's
+# built-in <stdatomic.h>) and the gtest .cpp files (with the gtest include path).
+CompileFlags:
+  CompilationDatabase: build/ufsrvrxlib-test
+
+# Old clangd versions bundle a <stdatomic.h> whose atomic_*_explicit macros use
+# __auto_type, which strips the _Atomic qualifier and emits a spurious
+# "incompatible pointer types" on every atomic_*_explicit() call. The code is
+# correct under Clang 18 (the real build is clean). Suppress that false positive;
+# remove this block once clangd is updated to 18+.
+Diagnostics:
+  Suppress:
+    - incompatible-pointer-types
+    - incompatible-pointer-types-discards-qualifiers

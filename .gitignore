@@ -1,0 +1,17 @@
+build/
+build_test/
+html/
+*.o
+*.a
+*.so
+*.deb
+tests_repo_verification/reports/
+
+# IDE / editor cruft
+.idea/
+
+# Vendored third-party packages (nested clones) — re-vendored properly when needed
+packages/
+
+# version.c is generated into the build dir; ignore any stray source-tree copy
+/version.c

@@ -1,0 +1,12 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: @PROJECT_NAME@
+Description: ufsrv reactive-extensions library (coroutines, futures, scheduler)
+Version: @PROJECT_VERSION@
+Requires.private: uflib
+Cflags: -I${includedir}
+Libs: -L${libdir} -l@PROJECT_NAME@
+Libs.private: -lufsrvrxlib_aco

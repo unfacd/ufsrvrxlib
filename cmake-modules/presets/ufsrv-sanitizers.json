@@ -1,0 +1,90 @@
+{
+  "version": 6,
+  "include": [ "ufsrv-base.json" ],
+  "configurePresets": [
+    {
+      "name": "asan",
+      "displayName": "Debug + AddressSanitizer",
+      "inherits": "debug",
+      "cacheVariables": { "UFSRV_BUILD_WITH_ASAN": "ON" }
+    },
+    {
+      "name": "msan",
+      "displayName": "Debug + MemorySanitizer",
+      "inherits": "debug",
+      "cacheVariables": { "UFSRV_BUILD_WITH_MSAN": "ON" }
+    },
+    {
+      "name": "tsan",
+      "displayName": "Debug + ThreadSanitizer",
+      "inherits": "debug",
+      "cacheVariables": { "UFSRV_BUILD_WITH_TSAN": "ON" }
+    },
+    {
+      "name": "dev",
+      "displayName": "Dev (ASan+UBSan+LSan + max debug -ggdb3)",
+      "inherits": "debug",
+      "cacheVariables": {
+        "UFSRV_BUILD_WITH_ASAN": "ON",
+        "UFSRV_BUILD_WITH_UBSAN": "ON",
+        "UFSRV_BUILD_WITH_LSAN": "ON",
+        "UFSRV_C_DEBUG_FLAGS": "-ggdb3"
+      }
+    },
+    {
+      "name": "ubsan",
+      "displayName": "Debug + UndefinedBehaviorSanitizer",
+      "inherits": "debug",
+      "cacheVariables": { "UFSRV_BUILD_WITH_UBSAN": "ON" }
+    },
+    {
+      "name": "asan-ubsan",
+      "displayName": "Debug + ASan + UBSan (recommended)",
+      "inherits": "debug",
+      "cacheVariables": { "UFSRV_BUILD_WITH_ASAN": "ON", "UFSRV_BUILD_WITH_UBSAN": "ON" }
+    },
+    {
+      "name": "asan-lsan",
+      "displayName": "Debug + ASan + LSan",
+      "inherits": "debug",
+      "cacheVariables": { "UFSRV_BUILD_WITH_ASAN": "ON", "UFSRV_BUILD_WITH_LSAN": "ON" }
+    },
+    {
+      "name": "asan-ubsan-lsan",
+      "displayName": "Debug + ASan + UBSan + LSan",
+      "inherits": "debug",
+      "cacheVariables": { "UFSRV_BUILD_WITH_ASAN": "ON", "UFSRV_BUILD_WITH_UBSAN": "ON", "UFSRV_BUILD_WITH_LSAN": "ON" }
+    },
+    {
+      "name": "tsan-ubsan",
+      "displayName": "Debug + TSan + UBSan",
+      "inherits": "debug",
+      "cacheVariables": { "UFSRV_BUILD_WITH_TSAN": "ON", "UFSRV_BUILD_WITH_UBSAN": "ON" }
+    },
+    {
+      "name": "msan-ubsan",
+      "displayName": "Debug + MSan + UBSan",
+      "inherits": "debug",
+      "cacheVariables": { "UFSRV_BUILD_WITH_MSAN": "ON", "UFSRV_BUILD_WITH_UBSAN": "ON" }
+    },
+    {
+      "name": "devtest",
+      "displayName": "Dev + coverage (ASan+UBSan+LSan + -ggdb3 + coverage)",
+      "inherits": "dev",
+      "cacheVariables": { "UFSRV_BUILD_WITH_COVERAGE": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "msan", "configurePreset": "msan" },
+    { "name": "tsan", "configurePreset": "tsan" },
+    { "name": "dev",  "configurePreset": "dev" },
+    { "name": "ubsan", "configurePreset": "ubsan" },
+    { "name": "asan-ubsan", "configurePreset": "asan-ubsan" },
+    { "name": "asan-lsan", "configurePreset": "asan-lsan" },
+    { "name": "asan-ubsan-lsan", "configurePreset": "asan-ubsan-lsan" },
+    { "name": "tsan-ubsan", "configurePreset": "tsan-ubsan" },
+    { "name": "msan-ubsan", "configurePreset": "msan-ubsan" },
+    { "name": "devtest", "configurePreset": "devtest" }
+  ]
+}

@@ -1,0 +1,14 @@
+/**
+ * @file config.h.in
+ * @brief CMake configure_file() template — generates config.h in the build dir.
+ */
+
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#define _REENTRANT
+#ifndef _GNU_SOURCE
+# define _GNU_SOURCE
+#endif
+
+#endif /* CONFIG_H */
