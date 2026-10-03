@@ -59,6 +59,39 @@ void IntegrationEntry(void) {
     UfsrvCoroutineExit();
 }
 
+void ReturningEntry(void) {
+    g_step = 41;
+}
+
+void NestedReturnHelper(void) {
+    g_step = 42;
+}
+
+void NestedReturningEntry(void) {
+    NestedReturnHelper();
+}
+
+struct WorkerProbe {
+    UfsrvScheduler *scheduler;
+    std::atomic<bool> co_ran{false};
+    std::atomic<bool> job_ran{false};
+    std::atomic<bool> in_coroutine{true};
+    std::atomic<bool> has_scheduler{true};
+};
+
+void MarkerEntry(void) {
+    auto *probe = static_cast<WorkerProbe *>(UfsrvCoroutineGetArg());
+    probe->co_ran.store(true, std::memory_order_relaxed);
+    UfsrvCoroutineExit();
+}
+
+void PlainProbeJob(void *context_ptr) {
+    auto *probe = static_cast<WorkerProbe *>(context_ptr);
+    probe->in_coroutine.store(UfsrvCoroutineIsInCoroutine(), std::memory_order_relaxed);
+    probe->has_scheduler.store(UfsrvCoroutineCurrentScheduler() != nullptr, std::memory_order_relaxed);
+    probe->job_ran.store(true, std::memory_order_relaxed);
+}
+
 }  // namespace
 
 TEST(UfsrvCoroutineTest, CreateResumeYieldExit) {
@@ -164,4 +197,74 @@ TEST(UfsrvCoroutineTest, SchedulerIntegration) {
     UfsrvSchedulerDestroy(scheduler);
 
     EXPECT_EQ(ctx.step.load(), 2);
+}
+
+TEST(UfsrvCoroutineTest, EntryReturnTerminatesInsteadOfAborting) {
+    g_step = 0;
+    UfsrvCoroutine *co = UfsrvCoroutineCreate(ReturningEntry, nullptr);
+    ASSERT_NE(co, nullptr);
+
+    UfsrvCoroutineResume(co);
+    EXPECT_EQ(g_step, 41);
+    EXPECT_NE(UfsrvCoroutineCurrent(), co);
+
+    g_step = 0;
+    co = UfsrvCoroutineCreate(NestedReturningEntry, nullptr);
+    ASSERT_NE(co, nullptr);
+
+    UfsrvCoroutineResume(co);
+    EXPECT_EQ(g_step, 42);
+    EXPECT_NE(UfsrvCoroutineCurrent(), co);
+}
+
+TEST(UfsrvCoroutineTest, MainThreadIsNotACoroutine) {
+    EXPECT_FALSE(UfsrvCoroutineIsInCoroutine());
+}
+
+TEST(UfsrvCoroutineTest, PlainJobOnWorkerIsNotACoroutine) {
+    UfsrvScheduler *scheduler = UfsrvSchedulerCreate("probe");
+    ASSERT_NE(scheduler, nullptr);
+    ASSERT_EQ(UfsrvSchedulerStart(scheduler), 0);
+
+    WorkerProbe probe{scheduler};
+
+    UfsrvCoroutineSpawn(scheduler, MarkerEntry, &probe);
+    for (int i = 0; i < 10000 && !probe.co_ran.load(); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(probe.co_ran.load());
+
+    ASSERT_TRUE(UfsrvSchedulerSubmit(scheduler, PlainProbeJob, &probe));
+    for (int i = 0; i < 10000 && !probe.job_ran.load(); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    UfsrvSchedulerStop(scheduler);
+    UfsrvSchedulerJoin(scheduler);
+    UfsrvSchedulerDestroy(scheduler);
+
+    ASSERT_TRUE(probe.job_ran.load());
+    EXPECT_FALSE(probe.in_coroutine.load());
+    EXPECT_FALSE(probe.has_scheduler.load());
+}
+
+TEST(UfsrvCoroutineTest, AbandonedCoroutinesReclaimedAtThreadCleanup) {
+    int value = 0;
+
+    for (int i = 0; i < 16; i++) {
+        UfsrvCoroutine *co = UfsrvCoroutineCreate(StepEntry, &value);
+        ASSERT_NE(co, nullptr);
+    }
+
+    UfsrvCoroutineThreadCleanup();
+
+    g_step = 0;
+    UfsrvCoroutine *co = UfsrvCoroutineCreate(StepEntry, &value);
+    ASSERT_NE(co, nullptr);
+    UfsrvCoroutineResume(co);
+    EXPECT_EQ(g_step, 1);
+    UfsrvCoroutineResume(co);
+    EXPECT_EQ(g_step, 2);
+
+    UfsrvCoroutineThreadCleanup();
 }

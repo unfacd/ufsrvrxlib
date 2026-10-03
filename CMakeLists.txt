@@ -5,7 +5,7 @@
 #                          (+ SHARED if BUILD_SHARED_LIBS=ON)
 #   IS_ROOT_PROJECT=OFF → OBJECT library (compiled into parent via add_subdirectory)
 #
-# Depends on the system-installed uflib (bottom layer) via find_package(uflib).
+# Resolves uflib (bottom layer) from packages/uflib, the system install, or a fetch.
 #
 # Usage:
 #   cmake --preset dev
@@ -83,10 +83,10 @@ option(_PACKAGE_INSTALL "Enable install target" ${IS_ROOT_PROJECT})
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
 
-if(NOT TARGET uflib::uflib)
-    find_package(uflib REQUIRED)
-endif()
-message(STATUS "uflib dependency resolved via uflib::uflib")
+include(ufsrv_resolve_dependency)
+
+ufsrv_resolve_dependency(uflib UFLIB)
+message(STATUS "ufsrvrxlib: uflib resolved from ${uflib_ORIGIN} via ${uflib_TARGET}")
 
 # ── Build target — OBJECT library (dual-mode) ────────────────────────────────
 
@@ -148,7 +148,8 @@ set(_ufsrvrxlib_interface_includes
     $<INSTALL_INTERFACE:include/ufsrvrxlib>
 )
 set(_ufsrvrxlib_interface_libs
-    uflib::uflib
+    $<BUILD_INTERFACE:${uflib_TARGET}>
+    $<INSTALL_INTERFACE:uflib::uflib>
 )
 
 if(IS_ROOT_PROJECT)
@@ -162,16 +163,25 @@ endif()
 
 # ── Link dependencies ────────────────────────────────────────────────────────
 
-target_link_libraries(${_PROJECT_NAME} PUBLIC uflib::uflib)
+target_link_libraries(${_PROJECT_NAME} PUBLIC ${uflib_TARGET})
 
 set_target_properties(${_PROJECT_NAME} PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     OUTPUT_NAME ${_PROJECT_NAME}
 )
 
-# ── Vendored libaco (packages/libaco) — separate STATIC lib ────────────────
-# Built in isolation from the main OBJECT target so the third-party context-
-# switch assembly stays out of the sanitizer-instrumented ufsrvrxlib objects.
+# ── Vendored libaco (packages/libaco) ───────────────────────────────────────
+# Compiled in its own target so the third-party context-switch assembly stays
+# out of the sanitizer-instrumented ufsrvrxlib objects. That is a COMPILATION
+# constraint, and it does not decide the packaging.
+#
+# The objects belong to this library's archive. A static archive that leaves
+# symbols undefined and expects a second archive to be named beside it is not
+# self-contained: `pkg-config --libs ufsrvrxlib` would hand back a link line
+# that cannot resolve, and every consumer would have to know a private
+# implementation detail to fix it. libufsrvrxlib.a carries these objects, so
+# plain -lufsrvrxlib links and no Libs.private entry is owed.
+#
 # The build-interface include dir exposes <libaco/aco.h> to the coroutine
 # wrapper within the build tree only; it is not part of the installed interface.
 
@@ -183,10 +193,32 @@ target_include_directories(ufsrvrxlib_aco PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/packages>)
 set_target_properties(ufsrvrxlib_aco PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# acosw.S carries no .note.GNU-stack section, and an object without it makes the
+# linker mark the whole consuming image as needing an executable stack.
+target_compile_options(ufsrvrxlib_aco PRIVATE $<$<COMPILE_LANGUAGE:ASM>:-Wa,--noexecstack>)
+
 if(IS_ROOT_PROJECT)
-    target_link_libraries(${_PROJECT_NAME}_static PRIVATE ufsrvrxlib_aco)
+    # Objects, not a link dependency: target_sources archives them INTO
+    # libufsrvrxlib.a. It is also what keeps ufsrvrxlib::ufsrvrxlib_aco out of
+    # the installed target's link interface -- a consumer handed both would see
+    # every aco symbol defined twice.
+    target_sources(${_PROJECT_NAME}_static PRIVATE $<TARGET_OBJECTS:ufsrvrxlib_aco>)
     if(BUILD_SHARED_LIBS)
+        # A shared object resolves its own dependencies, so aco is linked into
+        # the .so and remains a private link dependency of it.
         target_link_libraries(${_PROJECT_NAME}_shared PRIVATE ufsrvrxlib_aco)
+    endif()
+else()
+    # add_subdirectory consumer: the parent links the OBJECT library, and that
+    # library's own INTERFACE_LINK_LIBRARIES are what reach the final link.
+    # Without this the parent resolves none of the aco symbols.
+    target_link_libraries(${_PROJECT_NAME} INTERFACE ufsrvrxlib_aco)
+endif()
+
+if(IS_ROOT_PROJECT AND (uflib_ORIGIN STREQUAL "SOURCE" OR uflib_ORIGIN STREQUAL "FETCH"))
+    target_sources(${_PROJECT_NAME}_static PRIVATE $<TARGET_OBJECTS:uflib>)
+    if(BUILD_SHARED_LIBS)
+        target_link_libraries(${_PROJECT_NAME}_shared PRIVATE uflib)
     endif()
 endif()
 
@@ -317,14 +349,14 @@ if(_PACKAGE_INSTALL)
     )
 
     # CPack (Debian packaging)
-    set(CPACK_PACKAGE_NAME "${_PROJECT_NAME}")
+    set(CPACK_PACKAGE_NAME "${_PROJECT_NAME}-dev")
     set(CPACK_PACKAGE_VERSION "${${_PROJECT_NAME_X}_VERSION}")
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "ufsrv reactive-extensions library (coroutines, futures, scheduler)")
     set(CPACK_GENERATOR "DEB")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "unfacd works")
     set(CPACK_DEBIAN_PACKAGE_SECTION "libs")
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libuflib")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, uflib-dev")
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
     include(CPack)
 endif()

@@ -85,6 +85,8 @@ PUBLIC_API void *UfsrvCoroutineGetArg(void);
  */
 PUBLIC_API UfsrvScheduler *UfsrvCoroutineCurrentScheduler(void);
 
+PUBLIC_API bool UfsrvCoroutineIsInCoroutine(void);
+
 /*!
  * @brief Terminate the current coroutine (does not return).
  */
@@ -94,8 +96,10 @@ PUBLIC_API void UfsrvCoroutineExit(void);
  * @brief Release the calling thread's coroutine resources.
  *
  * Destroys the thread's main coroutine and shared stack created lazily by
- * UfsrvCoroutineCreate. Idempotent. Call once, before a worker thread exits,
- * after all its coroutines have been destroyed.
+ * UfsrvCoroutineCreate, and reclaims any coroutine created on this thread but
+ * never resumed — its handle is invalid afterwards. Coroutines that have been
+ * resumed (running or suspended) are not touched: they must have exited before
+ * this call. Idempotent. Call once, before a worker thread exits.
  */
 PUBLIC_API void UfsrvCoroutineThreadCleanup(void);
 
@@ -109,7 +113,7 @@ PUBLIC_API void UfsrvCoroutineThreadCleanup(void);
  * @param[in,out] scheduler_ptr   Scheduler whose worker will resume the coroutine.
  * @param[in,out] coroutine_ptr   Suspended coroutine (may be NULL, a no-op).
  */
-PUBLIC_API void UfsrvCoroutineSubmitResume(UfsrvScheduler *scheduler_ptr, UfsrvCoroutine *coroutine_ptr);
+PUBLIC_API bool UfsrvCoroutineSubmitResume(UfsrvScheduler *scheduler_ptr, UfsrvCoroutine *coroutine_ptr);
 
 /*!
  * @brief Spawn a coroutine on a worker thread (create + first resume).

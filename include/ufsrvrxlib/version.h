@@ -12,8 +12,9 @@
 #include <ufsrvrxlib/ufsrvrxlib_defs.h>
 
 #define UFSRVRXLIB_MAJOR 0
-#define UFSRVRXLIB_MINOR 1
-#define UFSRVRXLIB_PATCH 21
+#define UFSRVRXLIB_MINOR 2
+#define UFSRVRXLIB_PATCH 0
+#define UFSRVRXLIB_INTERNAL 3
 
 /*!
  * @brief Full dotted version string (e.g. "0.1.0").

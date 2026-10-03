@@ -93,6 +93,7 @@ void CompleteJobFn(void *context_ptr) {
     int *v = static_cast<int *>(malloc(sizeof(int)));
     *v = job->value;
     UfsrvPromiseSetValue(job->promise, v, free);
+    UfsrvPromiseDestroy(job->promise);
     free(job);
 }
 
@@ -222,6 +223,7 @@ TEST(UfsrvFutureTest, SetValueThenRuns) {
     int *value = static_cast<int *>(malloc(sizeof(int)));
     *value = 42;
     UfsrvPromiseSetValue(promise, value, free);
+    UfsrvPromiseDestroy(promise);
 
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 0);
@@ -252,6 +254,7 @@ TEST(UfsrvFutureTest, SetErrorPropagates) {
     ASSERT_TRUE(UfsrvFutureThen(future, OnDone, &completion));
 
     UfsrvPromiseSetError(promise, 7);
+    UfsrvPromiseDestroy(promise);
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 7);
     EXPECT_EQ(completion.result.value, nullptr);
@@ -280,6 +283,7 @@ TEST(UfsrvFutureTest, ReentrantThen) {
     ASSERT_TRUE(UfsrvFutureThen(future, ReentrantOnDone, &ctx));
 
     UfsrvPromiseSetValue(promise, nullptr, nullptr);
+    UfsrvPromiseDestroy(promise);
     EXPECT_EQ(ctx.count.load(), 2);
 
     UfsrvFutureRelease(future);
@@ -301,6 +305,7 @@ TEST(UfsrvFutureTest, MapTransforms) {
     int *value = static_cast<int *>(malloc(sizeof(int)));
     *value = 21;
     UfsrvPromiseSetValue(promise, value, free);
+    UfsrvPromiseDestroy(promise);
 
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 0);
@@ -322,6 +327,7 @@ TEST(UfsrvFutureTest, MapPropagatesError) {
     ASSERT_TRUE(UfsrvFutureThen(mapped, OnDone, &completion));
 
     UfsrvPromiseSetError(promise, 5);
+    UfsrvPromiseDestroy(promise);
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 5);
     EXPECT_EQ(completion.result.value, nullptr);
@@ -346,6 +352,7 @@ TEST(UfsrvFutureTest, FlatMapChainsAsync) {
     int *value = static_cast<int *>(malloc(sizeof(int)));
     *value = 21;
     UfsrvPromiseSetValue(promise, value, free);
+    UfsrvPromiseDestroy(promise);
 
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 0);
@@ -367,6 +374,7 @@ TEST(UfsrvFutureTest, FlatMapPropagatesError) {
     ASSERT_TRUE(UfsrvFutureThen(chained, OnDone, &completion));
 
     UfsrvPromiseSetError(promise, 5);
+    UfsrvPromiseDestroy(promise);
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 5);
 
@@ -388,6 +396,7 @@ TEST(UfsrvFutureTest, OnErrorRecovers) {
     ASSERT_TRUE(UfsrvFutureThen(recovered, OnDone, &completion));
 
     UfsrvPromiseSetError(promise, 5);
+    UfsrvPromiseDestroy(promise);
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 0);
     EXPECT_EQ(*static_cast<int *>(completion.result.value), 105);
@@ -410,6 +419,7 @@ TEST(UfsrvFutureTest, OnErrorForwardsSuccess) {
     int *value = static_cast<int *>(malloc(sizeof(int)));
     *value = 42;
     UfsrvPromiseSetValue(promise, value, free);
+    UfsrvPromiseDestroy(promise);
 
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 0);
@@ -436,6 +446,7 @@ TEST(UfsrvFutureTest, DoOnSuccessSideEffectAndForward) {
     int *value = static_cast<int *>(malloc(sizeof(int)));
     *value = 7;
     UfsrvPromiseSetValue(promise, value, free);
+    UfsrvPromiseDestroy(promise);
 
     EXPECT_EQ(g_action_count.load(), 1);
     EXPECT_EQ(completion.count.load(), 1);
@@ -460,8 +471,10 @@ TEST(UfsrvFutureTest, AllSuccess) {
     ASSERT_TRUE(UfsrvFutureThen(all, OnDone, &completion));
 
     UfsrvPromiseSetValue(p1, nullptr, nullptr);
+    UfsrvPromiseDestroy(p1);
     EXPECT_EQ(completion.count.load(), 0);  // not done yet
     UfsrvPromiseSetValue(p2, nullptr, nullptr);
+    UfsrvPromiseDestroy(p2);
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 0);
 
@@ -482,9 +495,11 @@ TEST(UfsrvFutureTest, AllFailFast) {
     ASSERT_TRUE(UfsrvFutureThen(all, OnDone, &completion));
 
     UfsrvPromiseSetError(p1, 5);
+    UfsrvPromiseDestroy(p1);
     EXPECT_EQ(completion.count.load(), 1);  // fail-fast
     EXPECT_EQ(completion.result.error, 5);
-    UfsrvPromiseSetValue(p2, nullptr, nullptr);  // completes later; no-op
+    UfsrvPromiseSetValue(p2, nullptr, nullptr);
+    UfsrvPromiseDestroy(p2);  // completes later; no-op
 
     UfsrvFutureRelease(all);
     UfsrvFutureRelease(f1);
@@ -513,8 +528,10 @@ TEST(UfsrvFutureTest, ZipSuccess) {
     int *b = static_cast<int *>(malloc(sizeof(int)));
     *b = 22;
     UfsrvPromiseSetValue(p1, a, free);
+    UfsrvPromiseDestroy(p1);
     EXPECT_EQ(completion.count.load(), 0);
     UfsrvPromiseSetValue(p2, b, free);
+    UfsrvPromiseDestroy(p2);
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 0);
     EXPECT_EQ(*static_cast<int *>(completion.result.value), 42);
@@ -535,7 +552,9 @@ TEST(UfsrvFutureTest, ZipErrorPropagates) {
     ASSERT_TRUE(UfsrvFutureThen(zipped, OnDone, &completion));
 
     UfsrvPromiseSetError(p1, 9);
+    UfsrvPromiseDestroy(p1);
     UfsrvPromiseSetValue(p2, nullptr, nullptr);
+    UfsrvPromiseDestroy(p2);
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 9);
 
@@ -558,13 +577,15 @@ TEST(UfsrvFutureTest, AnyFirstWins) {
     int *a = static_cast<int *>(malloc(sizeof(int)));
     *a = 7;
     UfsrvPromiseSetValue(p1, a, free);
+    UfsrvPromiseDestroy(p1);
     EXPECT_EQ(completion.count.load(), 1);
     EXPECT_EQ(completion.result.error, 0);
     EXPECT_EQ(*static_cast<int *>(completion.result.value), 7);
 
     int *b = static_cast<int *>(malloc(sizeof(int)));
     *b = 8;
-    UfsrvPromiseSetValue(p2, b, free);  // loser; value stays owned by f2
+    UfsrvPromiseSetValue(p2, b, free);
+    UfsrvPromiseDestroy(p2);  // loser; value stays owned by f2
 
     UfsrvFutureRelease(any);
     UfsrvFutureRelease(f1);
@@ -611,6 +632,7 @@ TEST(UfsrvFutureTest, BlockingGetOnPlainThread) {
         int *v = static_cast<int *>(malloc(sizeof(int)));
         *v = 99;
         UfsrvPromiseSetValue(promise, v, free);
+    UfsrvPromiseDestroy(promise);
     });
 
     /* Block on the plain (main) thread until the completer finishes. */
@@ -634,6 +656,7 @@ TEST(UfsrvFutureTest, BlockingGetStress) {
             int *v = static_cast<int *>(malloc(sizeof(int)));
             *v = it;
             UfsrvPromiseSetValue(promise, v, free);
+    UfsrvPromiseDestroy(promise);
         });
 
         UfsrvFutureResult r = UfsrvFutureGet(future);   /* race: complete vs block */
@@ -684,6 +707,7 @@ TEST(UfsrvFutureTest, BlockingGetWithCancellationRace) {
             int *v = static_cast<int *>(malloc(sizeof(int)));
             *v = it;
             UfsrvPromiseSetValue(promise, v, free);
+    UfsrvPromiseDestroy(promise);
         });
         std::thread canceller([token]() {
             UfsrvCancellationTokenCancel(token);
@@ -833,6 +857,7 @@ TEST(UfsrvFutureTest, CancelVsCompleteRace) {
         int *v = static_cast<int *>(malloc(sizeof(int)));
         *v = 42;
         UfsrvPromiseSetValue(promise, v, free);
+    UfsrvPromiseDestroy(promise);
         canceller.join();
 
         for (int i = 0; i < 10000 && ctx.done.load() < 1; i++) {
@@ -891,6 +916,7 @@ TEST(UfsrvFutureTest, AttachCancellationRacesPromise) {
         *v = 42;
         std::thread canceller([token]() { UfsrvCancellationTokenCancel(token); });
         UfsrvPromiseSetValue(promise, v, free);
+    UfsrvPromiseDestroy(promise);
         canceller.join();
 
         EXPECT_TRUE(UfsrvFutureIsReady(future));
@@ -989,6 +1015,7 @@ TEST(UfsrvFutureTest, FlatMapPropagatesCancellationToInner) {
     int *v = static_cast<int *>(malloc(sizeof(int)));
     *v = 7;
     UfsrvPromiseSetValue(src_promise, v, free);
+    UfsrvPromiseDestroy(src_promise);
 
     EXPECT_FALSE(UfsrvFutureIsReady(inner));   /* producer hasn't completed it yet */
 
@@ -1013,7 +1040,9 @@ TEST(UfsrvFutureTest, NullArguments) {
     EXPECT_EQ(UfsrvPromiseCreate(nullptr), nullptr);
 
     UfsrvPromiseSetValue(nullptr, nullptr, nullptr);
+    UfsrvPromiseDestroy(nullptr);
     UfsrvPromiseSetError(nullptr, 0);
+    UfsrvPromiseDestroy(nullptr);
     UfsrvPromiseDestroy(nullptr);
 
     EXPECT_FALSE(UfsrvFutureThen(nullptr, OnDone, nullptr));
@@ -1037,13 +1066,22 @@ TEST(UfsrvFutureTest, NullArguments) {
     UfsrvFutureRelease(nullptr);
 }
 
-TEST(UfsrvFutureTest, AbandonNeverCompletes) {
+TEST(UfsrvFutureTest, AbandonCompletesWithBrokenPromise) {
     UfsrvFuture *future = nullptr;
     UfsrvPromise *promise = UfsrvPromiseCreate(&future);
     ASSERT_NE(promise, nullptr);
 
+    Completion completion;
+    ASSERT_TRUE(UfsrvFutureThen(future, OnDone, &completion));
+
     UfsrvPromiseDestroy(promise);
-    EXPECT_FALSE(UfsrvFutureIsReady(future));
+
+    EXPECT_TRUE(UfsrvFutureIsReady(future));
+    EXPECT_EQ(completion.count.load(), 1);
+    EXPECT_EQ(completion.result.error, EPIPE);
+
+    UfsrvFutureResult result = UfsrvFutureGet(future);
+    EXPECT_EQ(result.error, EPIPE);
 
     UfsrvFutureRelease(future);
 }
@@ -1056,6 +1094,424 @@ TEST(UfsrvFutureTest, RetainReleaseBalance) {
     UfsrvFutureRetain(future);
     UfsrvFutureRelease(future);
     UfsrvPromiseSetValue(promise, nullptr, nullptr);
+    UfsrvPromiseDestroy(promise);
 
     UfsrvFutureRelease(future);
+}
+
+namespace {
+
+struct WorkerGetProbe {
+    UfsrvFuture *future;
+    UfsrvCancellationToken *token;
+    std::atomic<bool> returned{false};
+    std::atomic<bool> timed_out{false};
+    std::atomic<bool> used_token{false};
+    std::atomic<int> error{0};
+};
+
+void WorkerGetJob(void *context_ptr) {
+    auto *probe = static_cast<WorkerGetProbe *>(context_ptr);
+    UfsrvFutureResult result;
+
+    if (probe->used_token.load(std::memory_order_relaxed)) {
+        result = UfsrvFutureGetWithCancellation(probe->future, probe->token);
+    } else {
+        result = UfsrvFutureGet(probe->future);
+    }
+
+    probe->error.store(result.error, std::memory_order_relaxed);
+    probe->returned.store(true, std::memory_order_relaxed);
+}
+
+int RunWorkerGetProbe(UfsrvFuture *future, UfsrvCancellationToken *token, bool *returned) {
+    UfsrvScheduler *scheduler = UfsrvSchedulerCreate("getguard");
+    if (scheduler == nullptr) {
+        return -777;
+    }
+    if (UfsrvSchedulerStart(scheduler) != 0) {
+        UfsrvSchedulerDestroy(scheduler);
+        return -777;
+    }
+
+    WorkerGetProbe probe{future, token, false, false, token != nullptr, 0};
+    bool submitted = UfsrvSchedulerSubmit(scheduler, WorkerGetJob, &probe);
+
+    for (int i = 0; i < 3000 && submitted && !probe.returned.load(); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    *returned = probe.returned.load();
+    int error = probe.error.load();
+
+    UfsrvSchedulerStop(scheduler);
+    UfsrvSchedulerJoin(scheduler);
+    UfsrvSchedulerDestroy(scheduler);
+
+    return submitted ? error : -777;
+}
+
+}  // namespace
+
+TEST(UfsrvFutureTest, BlockingGetOnWorkerReturnsError) {
+#ifndef NDEBUG
+    GTEST_SKIP();
+#endif
+    UfsrvFuture *future = nullptr;
+    UfsrvPromise *promise = UfsrvPromiseCreate(&future);
+    ASSERT_NE(promise, nullptr);
+
+    bool returned = false;
+    int error = RunWorkerGetProbe(future, nullptr, &returned);
+
+    EXPECT_TRUE(returned);
+    EXPECT_EQ(error, EDEADLK);
+
+    UfsrvPromiseDestroy(promise);
+    UfsrvFutureRelease(future);
+}
+
+TEST(UfsrvFutureTest, BlockingCancellableGetOnWorkerReturnsError) {
+#ifndef NDEBUG
+    GTEST_SKIP();
+#endif
+    UfsrvFuture *future = nullptr;
+    UfsrvPromise *promise = UfsrvPromiseCreate(&future);
+    ASSERT_NE(promise, nullptr);
+
+    UfsrvCancellationToken *token = UfsrvCancellationTokenCreate();
+    ASSERT_NE(token, nullptr);
+
+    bool returned = false;
+    int error = RunWorkerGetProbe(future, token, &returned);
+
+    EXPECT_TRUE(returned);
+    EXPECT_EQ(error, EDEADLK);
+
+    UfsrvPromiseDestroy(promise);
+    UfsrvFutureRelease(future);
+    UfsrvCancellationTokenDestroy(token);
+}
+
+TEST(UfsrvFutureTest, ReadyFutureGetOnWorkerStillReturnsValue) {
+    UfsrvFuture *future = nullptr;
+    UfsrvPromise *promise = UfsrvPromiseCreate(&future);
+    ASSERT_NE(promise, nullptr);
+
+    int *value = static_cast<int *>(malloc(sizeof(int)));
+    ASSERT_NE(value, nullptr);
+    *value = 1234;
+    UfsrvPromiseSetValue(promise, value, free);
+    UfsrvPromiseDestroy(promise);
+    ASSERT_TRUE(UfsrvFutureIsReady(future));
+
+    bool returned = false;
+    int error = RunWorkerGetProbe(future, nullptr, &returned);
+
+    EXPECT_TRUE(returned);
+    EXPECT_EQ(error, 0);
+
+    UfsrvFutureRelease(future);
+}
+
+TEST(UfsrvFutureTest, ThenRacingCompletionRunsExactlyOnce) {
+    const int kRounds = 2000;
+
+    for (int i = 0; i < kRounds; i++) {
+        UfsrvFuture *future = nullptr;
+        UfsrvPromise *promise = UfsrvPromiseCreate(&future);
+        ASSERT_NE(promise, nullptr);
+
+        Completion completion;
+        std::thread registrar([&] { UfsrvFutureThen(future, OnDone, &completion); });
+
+        UfsrvPromiseSetValue(promise, nullptr, nullptr);
+    UfsrvPromiseDestroy(promise);
+        registrar.join();
+
+        ASSERT_EQ(completion.count.load(), 1) << "round " << i;
+        UfsrvFutureRelease(future);
+    }
+}
+
+TEST(UfsrvFutureTest, BlockingGetRacingCompletionReturnsValue) {
+    const int kRounds = 500;
+
+    for (int i = 0; i < kRounds; i++) {
+        UfsrvFuture *future = nullptr;
+        UfsrvPromise *promise = UfsrvPromiseCreate(&future);
+        ASSERT_NE(promise, nullptr);
+
+        std::atomic<int> seen{-1};
+        std::thread waiter([&] {
+            UfsrvFutureResult result = UfsrvFutureGet(future);
+            seen.store(result.error, std::memory_order_relaxed);
+        });
+
+        UfsrvPromiseSetValue(promise, nullptr, nullptr);
+    UfsrvPromiseDestroy(promise);
+        waiter.join();
+
+        ASSERT_EQ(seen.load(), 0) << "round " << i;
+        UfsrvFutureRelease(future);
+    }
+}
+
+TEST(UfsrvFutureTest, SecondMoveOperatorGetsEINVAL) {
+    UfsrvFuture *future = nullptr;
+    UfsrvPromise *promise = UfsrvPromiseCreate(&future);
+    ASSERT_NE(promise, nullptr);
+
+    int *value = static_cast<int *>(malloc(sizeof(int)));
+    ASSERT_NE(value, nullptr);
+    *value = 5;
+    UfsrvPromiseSetValue(promise, value, free);
+    UfsrvPromiseDestroy(promise);
+
+    UfsrvFuture *first = UfsrvFutureOnError(future, Recover, nullptr);
+    ASSERT_NE(first, nullptr);
+    UfsrvFuture *second = UfsrvFutureOnError(future, Recover, nullptr);
+    ASSERT_NE(second, nullptr);
+
+    EXPECT_EQ(UfsrvFutureGet(first).error, 0);
+    EXPECT_EQ(UfsrvFutureGet(second).error, EINVAL);
+
+    UfsrvFutureRelease(first);
+    UfsrvFutureRelease(second);
+    UfsrvFutureRelease(future);
+}
+
+TEST(UfsrvFutureTest, ZipSurvivesReleasedInput) {
+    UfsrvFuture *a = nullptr;
+    UfsrvPromise *pa = UfsrvPromiseCreate(&a);
+    ASSERT_NE(pa, nullptr);
+    UfsrvFuture *b = nullptr;
+    UfsrvPromise *pb = UfsrvPromiseCreate(&b);
+    ASSERT_NE(pb, nullptr);
+
+    int *va = static_cast<int *>(malloc(sizeof(int)));
+    ASSERT_NE(va, nullptr);
+    *va = 21;
+    UfsrvPromiseSetValue(pa, va, free);
+    UfsrvPromiseDestroy(pa);
+
+    UfsrvFuture *zip = UfsrvFutureZip(a, b, SumZipper, nullptr);
+    ASSERT_NE(zip, nullptr);
+
+    UfsrvFutureRelease(a);
+
+    int *vb = static_cast<int *>(malloc(sizeof(int)));
+    ASSERT_NE(vb, nullptr);
+    *vb = 21;
+    UfsrvPromiseSetValue(pb, vb, free);
+    UfsrvPromiseDestroy(pb);
+
+    UfsrvFutureResult result = UfsrvFutureGet(zip);
+    ASSERT_EQ(result.error, 0);
+    ASSERT_NE(result.value, nullptr);
+    EXPECT_EQ(*static_cast<int *>(result.value), 42);
+
+    UfsrvFutureRelease(zip);
+    UfsrvFutureRelease(b);
+}
+
+TEST(UfsrvFutureTest, AllWithNullElementCompletesWithError) {
+    UfsrvFuture *inputs[2] = { UfsrvFutureFromValue(nullptr, nullptr), nullptr };
+    ASSERT_NE(inputs[0], nullptr);
+
+    UfsrvFuture *all = UfsrvFutureAll(inputs, 2);
+    ASSERT_NE(all, nullptr);
+
+    EXPECT_TRUE(UfsrvFutureIsReady(all));
+    EXPECT_EQ(UfsrvFutureGet(all).error, EINVAL);
+
+    UfsrvFutureRelease(all);
+    UfsrvFutureRelease(inputs[0]);
+}
+
+namespace {
+
+std::atomic<int> g_free_count{0};
+
+void CountCancelCallback(void *context_ptr) {
+    static_cast<std::atomic<int> *>(context_ptr)->fetch_add(1, std::memory_order_relaxed);
+}
+
+void CountFree(void *value_ptr) {
+    free(value_ptr);
+    g_free_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+}  // namespace
+
+TEST(UfsrvFutureTest, RegisterOnCancelledTokenRunsInline) {
+    UfsrvCancellationToken *token = UfsrvCancellationTokenCreate();
+    ASSERT_NE(token, nullptr);
+    UfsrvCancellationTokenCancel(token);
+
+    std::atomic<int> calls{0};
+    void *handle = UfsrvCancellationTokenRegister(token, CountCancelCallback, &calls);
+    ASSERT_NE(handle, nullptr);
+    EXPECT_EQ(calls.load(), 1);
+    EXPECT_FALSE(UfsrvCancellationTokenUnregister(handle));
+
+    UfsrvCancellationTokenDestroy(token);
+}
+
+TEST(UfsrvFutureTest, ValueFreedAtReleaseNotTokenDestroy) {
+    UfsrvCancellationToken *token = UfsrvCancellationTokenCreate();
+    ASSERT_NE(token, nullptr);
+
+    UfsrvFuture *future = nullptr;
+    UfsrvPromise *promise = UfsrvPromiseCreate(&future);
+    ASSERT_NE(promise, nullptr);
+    ASSERT_TRUE(UfsrvFutureAttachCancellation(future, token));
+
+    int *value = static_cast<int *>(malloc(sizeof(int)));
+    ASSERT_NE(value, nullptr);
+    *value = 3;
+    g_free_count.store(0, std::memory_order_relaxed);
+    UfsrvPromiseSetValue(promise, value, CountFree);
+    UfsrvPromiseDestroy(promise);
+
+    EXPECT_EQ(g_free_count.load(), 0);
+    UfsrvFutureRelease(future);
+    EXPECT_EQ(g_free_count.load(), 1);
+
+    UfsrvCancellationTokenDestroy(token);
+}
+
+TEST(UfsrvFutureTest, DerivedOperatorSurvivesTokenRelease) {
+    UfsrvCancellationToken *token = UfsrvCancellationTokenCreate();
+    ASSERT_NE(token, nullptr);
+
+    UfsrvFuture *source = nullptr;
+    UfsrvPromise *promise = UfsrvPromiseCreate(&source);
+    ASSERT_NE(promise, nullptr);
+    ASSERT_TRUE(UfsrvFutureAttachCancellation(source, token));
+
+    UfsrvFuture *mapped = UfsrvFutureMap(source, DoubleMapper, nullptr);
+    ASSERT_NE(mapped, nullptr);
+
+    UfsrvCancellationTokenDestroy(token);
+
+    int *value = static_cast<int *>(malloc(sizeof(int)));
+    ASSERT_NE(value, nullptr);
+    *value = 21;
+    UfsrvPromiseSetValue(promise, value, free);
+    UfsrvPromiseDestroy(promise);
+
+    UfsrvFutureResult result = UfsrvFutureGet(mapped);
+    ASSERT_EQ(result.error, 0);
+    ASSERT_NE(result.value, nullptr);
+    EXPECT_EQ(*static_cast<int *>(result.value), 42);
+
+    UfsrvFutureRelease(mapped);
+    UfsrvFutureRelease(source);
+}
+
+namespace {
+
+std::atomic<int> g_ex_free_count{0};
+
+void CountExFree(void *value_ptr) {
+    free(value_ptr);
+    g_ex_free_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void *AllocIntMapper(const void *value_ptr, void *context_ptr) {
+    (void)value_ptr;
+    (void)context_ptr;
+    int *out = static_cast<int *>(malloc(sizeof(int)));
+    if (out != nullptr) {
+        *out = 7;
+    }
+    return out;
+}
+
+void *AllocIntZipper(const void *value_a_ptr, const void *value_b_ptr, void *context_ptr) {
+    (void)value_a_ptr;
+    (void)value_b_ptr;
+    (void)context_ptr;
+    int *out = static_cast<int *>(malloc(sizeof(int)));
+    if (out != nullptr) {
+        *out = 11;
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST(UfsrvFutureTest, MapExReleasesValueWithOwnDestructor) {
+    UfsrvFuture *source = UfsrvFutureFromValue(nullptr, nullptr);
+    ASSERT_NE(source, nullptr);
+
+    g_ex_free_count.store(0, std::memory_order_relaxed);
+    UfsrvFuture *mapped = UfsrvFutureMapEx(source, AllocIntMapper, nullptr, CountExFree);
+    ASSERT_NE(mapped, nullptr);
+    EXPECT_EQ(g_ex_free_count.load(), 0);
+
+    UfsrvFutureRelease(mapped);
+    EXPECT_EQ(g_ex_free_count.load(), 1);
+
+    UfsrvFutureRelease(source);
+}
+
+TEST(UfsrvFutureTest, ZipExReleasesValueWithOwnDestructor) {
+    UfsrvFuture *first = UfsrvFutureFromValue(nullptr, nullptr);
+    UfsrvFuture *second = UfsrvFutureFromValue(nullptr, nullptr);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+
+    g_ex_free_count.store(0, std::memory_order_relaxed);
+    UfsrvFuture *zipped = UfsrvFutureZipEx(first, second, AllocIntZipper, nullptr, CountExFree);
+    ASSERT_NE(zipped, nullptr);
+    EXPECT_EQ(g_ex_free_count.load(), 0);
+
+    UfsrvFutureRelease(zipped);
+    EXPECT_EQ(g_ex_free_count.load(), 1);
+
+    UfsrvFutureRelease(first);
+    UfsrvFutureRelease(second);
+}
+
+TEST(UfsrvFutureTest, MapExNullDestructorLeavesValueToCaller) {
+    UfsrvFuture *source = UfsrvFutureFromValue(nullptr, nullptr);
+    ASSERT_NE(source, nullptr);
+
+    UfsrvFuture *mapped = UfsrvFutureMapEx(source, AllocIntMapper, nullptr, nullptr);
+    ASSERT_NE(mapped, nullptr);
+
+    UfsrvFutureResult result = UfsrvFutureGet(mapped);
+    ASSERT_EQ(result.error, 0);
+    ASSERT_NE(result.value, nullptr);
+    int *owned = static_cast<int *>(result.value);
+
+    UfsrvFutureRelease(mapped);
+    EXPECT_EQ(*owned, 7);   // freed by the library -> ASan use-after-free here
+    free(owned);
+
+    UfsrvFutureRelease(source);
+}
+
+TEST(UfsrvFutureTest, ZipExNullDestructorLeavesValueToCaller) {
+    UfsrvFuture *first = UfsrvFutureFromValue(nullptr, nullptr);
+    UfsrvFuture *second = UfsrvFutureFromValue(nullptr, nullptr);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+
+    UfsrvFuture *zipped = UfsrvFutureZipEx(first, second, AllocIntZipper, nullptr, nullptr);
+    ASSERT_NE(zipped, nullptr);
+
+    UfsrvFutureResult result = UfsrvFutureGet(zipped);
+    ASSERT_EQ(result.error, 0);
+    ASSERT_NE(result.value, nullptr);
+    int *owned = static_cast<int *>(result.value);
+
+    UfsrvFutureRelease(zipped);
+    EXPECT_EQ(*owned, 11);   // freed by the library -> ASan use-after-free here
+    free(owned);
+
+    UfsrvFutureRelease(first);
+    UfsrvFutureRelease(second);
 }

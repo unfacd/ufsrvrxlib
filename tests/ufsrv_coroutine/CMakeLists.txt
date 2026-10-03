@@ -8,6 +8,6 @@ add_c_test(
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_BINARY_DIR}
     LIBRARIES
-        uflib::uflib
+        ${uflib_TARGET}
         ufsrvrxlib_aco
 )

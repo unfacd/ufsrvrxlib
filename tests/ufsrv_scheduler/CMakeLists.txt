@@ -7,7 +7,7 @@ add_c_test(
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_BINARY_DIR}
     LIBRARIES
-        uflib::uflib
+        ${uflib_TARGET}
 )
 
 # Standalone stress-test executable (not CTest-registered — run manually).
@@ -19,5 +19,5 @@ target_include_directories(ufsrv_scheduler_stress PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_BINARY_DIR}
 )
-target_link_libraries(ufsrv_scheduler_stress PRIVATE uflib::uflib m)
+target_link_libraries(ufsrv_scheduler_stress PRIVATE ${uflib_TARGET} m)
 ufsrv_apply_build_options(ufsrv_scheduler_stress)

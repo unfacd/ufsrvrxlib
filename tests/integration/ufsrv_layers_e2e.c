@@ -59,7 +59,8 @@ sCoroutineEntry(void)
     UfsrvFuture *future = NULL;
     UfsrvPromise *promise = UfsrvPromiseCreate(&future);
     UfsrvFutureThen(future, sOnFutureDone, NULL);
-    UfsrvPromiseSetValue(promise, NULL, NULL);   /* completes → runs sOnFutureDone */
+    UfsrvPromiseSetValue(promise, NULL, NULL);
+    UfsrvPromiseDestroy(promise);   /* completes → runs sOnFutureDone */
     UfsrvFutureRelease(future);
 
     /* Coroutine layer: re-submit self to this worker, yield, then resume. */
