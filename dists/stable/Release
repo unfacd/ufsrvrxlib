@@ -1,0 +1,20 @@
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Sat, 03 Oct 2026 11:52:11 +0000
+Description: unfacd apt repository
+Label: unfacd
+Origin: unfacd
+Suite: stable
+MD5Sum:
+ 3578ff9f648d1e4b92e4b5fc48cb0508              622 main/binary-amd64/Packages
+ 7698310793cf5e07043fd9792175d09c              451 main/binary-amd64/Packages.gz
+SHA1:
+ 756534cd20b9276274718ada00948088d5764fb3              622 main/binary-amd64/Packages
+ 8c4212290d514754fafcabc1191a465959c44928              451 main/binary-amd64/Packages.gz
+SHA256:
+ 1cbcf870fd0c157c59571002e61d662ae18e219f4ead94a7a491fd613dab93b3              622 main/binary-amd64/Packages
+ caf0cd65a0dd0cfb4191e12785ae2fbca12a9d76f75b678927132c9fde9af53f              451 main/binary-amd64/Packages.gz
+SHA512:
+ 2c5cca6219ff190838532e2469ec49238b4f191d2f93901ee07028dcbc0eb4b50bfd3074053700718385a1f7ec27ff6fc0d1469bdf99a2761fb5341796f462fd              622 main/binary-amd64/Packages
+ 055ba952d8d1f24655699d2cf9f67fcc1aa426617ac90ce972ddee92ec1c25c34d93dc8297d8b97898e566aefce8374065e82c92355a449936b5f9c162f57736              451 main/binary-amd64/Packages.gz

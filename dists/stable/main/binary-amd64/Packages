@@ -1,0 +1,16 @@
+Package: ufsrvrxlib-dev
+Architecture: amd64
+Version: 0.2.0
+Priority: optional
+Section: libs
+Maintainer: unfacd works
+Installed-Size: 192
+Depends: libc6, uflib-dev
+Filename: pool/main/u/ufsrvrxlib-dev/ufsrvrxlib-dev_0.2.0_amd64.deb
+Size: 38542
+MD5sum: 4f6706156dd2bb3538a28668eb23617a
+SHA1: cc4a31261bc115986870ecfb276fc42d094a78f1
+SHA256: 60008a4ec1d2d2018cc8d692b7499d1d535ec873d6be7639e9706aab30522542
+SHA512: 01130414aa4abdc301f7d6c10a8638f209c0cacef062b61fdb02b13900e707fd88b3adea79c2420dc1c5e9c73eb48eb5aa91edaa70ede00577900d3a9bc25900
+Description: ufsrv reactive-extensions library (coroutines, futures, scheduler)
+

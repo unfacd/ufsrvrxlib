@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ufsrvrxlib-dev — apt repository</title>
+<meta name="description" content="Signed apt repository for ufsrvrxlib, the reactive-extensions library of the ufsrv stack.">
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1b1f23; --muted: #5c6670;
+    --rule: #e1e4e8; --panel: #f6f8fa; --accent: #0b5fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1;
+      --rule: #30363d; --panel: #161b22; --accent: #6ea8ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 46rem; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+  h1 { font-size: 1.9rem; margin: 0 0 .4rem; letter-spacing: -.02em; }
+  h1 code { font-size: 1.9rem; background: none; padding: 0; }
+  h2 { font-size: 1.15rem; margin: 2.5rem 0 .75rem; letter-spacing: -.01em; }
+  p { margin: .75rem 0; }
+  .lede { color: var(--muted); font-size: 1.05rem; margin-bottom: 1.5rem; }
+  a { color: var(--accent); }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .875em;
+  }
+  code { background: var(--panel); padding: .15em .35em; border-radius: 4px; }
+  pre {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 8px;
+    padding: .85rem 1rem; overflow-x: auto; margin: .75rem 0;
+  }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: .75rem 0; font-size: .94rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: .82rem; text-transform: uppercase; letter-spacing: .04em; }
+  .note { border-left: 3px solid var(--rule); padding-left: .9rem; color: var(--muted); font-size: .93rem; }
+  footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .88rem; }
+  .fpr { word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+
+  <header>
+    <h1><code>ufsrvrxlib-dev</code></h1>
+    <p class="lede">
+      Signed apt repository for <strong>ufsrvrxlib</strong> — the reactive-extensions
+      library of the ufsrv stack: coroutines, futures, cancellation and the scheduler
+      that drives them.
+    </p>
+    <p class="lede">
+      amd64 · AGPL-3.0-or-later
+    </p>
+  </header>
+
+  <section>
+    <h2>Install</h2>
+
+    <p>Add the signing key:</p>
+<pre><code>curl -fsSL https://unfacd.github.io/ufsrvrxlib/apt-unfacd.pub.asc \
+  | sudo tee /etc/apt/keyrings/unfacd-apt.asc &gt;/dev/null</code></pre>
+
+    <p>Then the repository:</p>
+<pre><code># /etc/apt/sources.list.d/unfacd.sources
+Types: deb
+URIs: https://unfacd.github.io/ufsrvrxlib
+Suites: stable
+Components: main
+Signed-By: /etc/apt/keyrings/unfacd-apt.asc</code></pre>
+
+<pre><code>sudo apt update
+sudo apt install ufsrvrxlib-dev</code></pre>
+
+    <p class="note">
+      The repository metadata is signed, so apt verifies it against the key above.
+      No <code>[trusted=yes]</code> and no <code>--allow-insecure-repositories</code> needed.
+    </p>
+
+    <p class="note">
+      <code>ufsrvrxlib-dev</code> depends on <code>uflib-dev</code>, which is served from
+      <a href="https://unfacd.github.io/uflib">unfacd.github.io/uflib</a>. Add that repository
+      too, or apt will refuse the install with an unsatisfied dependency.
+    </p>
+  </section>
+
+  <section>
+    <h2>What the package contains</h2>
+    <table>
+      <tr><th>Item</th><th>Detail</th></tr>
+      <tr><td>Headers</td><td>9 files under <code>/usr/include/ufsrvrxlib/</code></td></tr>
+      <tr><td>pkg-config</td><td><code>ufsrvrxlib.pc</code></td></tr>
+      <tr><td>CMake package</td><td><code>find_package(ufsrvrxlib)</code> → <code>ufsrvrxlib::ufsrvrxlib</code></td></tr>
+      <tr><td>Static libraries</td><td><code>libufsrvrxlib.a</code> and <code>libufsrvrxlib_aco.a</code>, with vendored libaco folded in</td></tr>
+      <tr><td>Man page</td><td><code>ufsrvrxlib.7</code></td></tr>
+    </table>
+    <p class="note">
+      Static by default — no shared object is built unless the tree is configured with
+      <code>BUILD_SHARED_LIBS=ON</code>. Everything installs under <code>/usr</code>.
+    </p>
+  </section>
+
+  <section>
+    <h2>Verify the key</h2>
+    <p>
+      Signed by the <strong>unfacd apt-company signing subkey</strong>. Package metadata is
+      signed with the subkey; the certify-only primary key never leaves the build host.
+    </p>
+    <table>
+      <tr><th>Field</th><th>Value</th></tr>
+      <tr><td>UID</td><td><code>unfacd (apt-company) &lt;devops@unfacd.io&gt;</code></td></tr>
+      <tr><td>Signing subkey</td><td class="fpr"><code>D808EE41 47CC4195 2C9CBA7B 61784960 40D97E06</code></td></tr>
+      <tr><td>Primary key</td><td class="fpr"><code>8033A7BB 6A4E44EB FA142267 AA079F13 EEE21D09</code></td></tr>
+    </table>
+<pre><code>gpg --show-keys /etc/apt/keyrings/unfacd-apt.asc</code></pre>
+  </section>
+
+  <section>
+    <h2>Links</h2>
+    <table>
+      <tr><td><a href="https://github.com/unfacd/ufsrvrxlib">github.com/unfacd/ufsrvrxlib</a></td><td>Source and full developer documentation</td></tr>
+      <tr><td><a href="https://github.com/unfacd/ufsrvrxlib/blob/main/README.md">README.md</a></td><td>Overview, build presets, testing</td></tr>
+      <tr><td><a href="https://raw.githubusercontent.com/unfacd/ufsrvrxlib/gh-pages/apt-unfacd.pub.asc">apt-unfacd.pub.asc</a></td><td>Signing key</td></tr>
+    </table>
+  </section>
+
+  <footer>
+    <p>
+      Published from the <code>gh-pages</code> branch. This branch holds build output only —
+      source lives on <code>main</code>, mirrored from the primary tig repository.
+    </p>
+  </footer>
+
+</main>
+</body>
+</html>
