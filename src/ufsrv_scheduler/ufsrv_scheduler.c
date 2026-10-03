@@ -31,6 +31,8 @@
 
 #include <sys/eventfd.h>
 
+__thread UfsrvScheduler *t_worker_scheduler = NULL;
+
 /*!
  * @brief Run a dequeued job's callback and release the job.
  *
@@ -60,6 +62,7 @@ sWorkerMain(void *arg_ptr)
 
   scheduler_ptr->worker_id = pthread_self();
   atomic_store_explicit(&scheduler_ptr->is_worker_id_ready, true, memory_order_release);
+  t_worker_scheduler = scheduler_ptr;
 
   if (scheduler_ptr->name != NULL) {
     pthread_setname_np(pthread_self(), scheduler_ptr->name);
@@ -93,6 +96,7 @@ sWorkerMain(void *arg_ptr)
     sRunJob(node_ptr);
   }
 
+  t_worker_scheduler = NULL;
   return NULL;
 }
 
@@ -332,7 +336,8 @@ UfsrvSchedulerPoolSubmit(UfsrvSchedulerPool *pool_ptr, UfsrvSchedulerJobCallback
     return false;
   }
 
-  int idx = atomic_fetch_add_explicit(&pool_ptr->next, 1, memory_order_relaxed) % pool_ptr->worker_pool_sz;
+  unsigned idx = atomic_fetch_add_explicit(&pool_ptr->next, 1u, memory_order_relaxed)
+                     % (unsigned)pool_ptr->worker_pool_sz;
   return UfsrvSchedulerSubmit(pool_ptr->workers[idx], callback, context_ptr);
 }
 
@@ -481,11 +486,11 @@ DescribeScheduler(UfsrvSchedulerPool *pool_ptr, const char *worker_name, BufferD
   }
 
   int  worker_pool_sz = pool_ptr->worker_pool_sz;
-  int  next           = atomic_load_explicit(&pool_ptr->next, memory_order_relaxed);
+  unsigned next       = atomic_load_explicit(&pool_ptr->next, memory_order_relaxed);
   bool pool_running   = atomic_load_explicit(&pool_ptr->is_running, memory_order_acquire);
 
   BufferDescriptorAppendFormatted(provided,
-      "{\"worker_pool_sz\":%d,\"round_robin_next\":%d,\"pool_is_running\":%s,\"workers\":[",
+      "{\"worker_pool_sz\":%d,\"round_robin_next\":%u,\"pool_is_running\":%s,\"workers\":[",
       worker_pool_sz, next, pool_running ? "true" : "false");
 
   bool emitted = false;

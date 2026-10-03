@@ -72,6 +72,7 @@ sDownloadEntry(void)
     snprintf(image->url, sizeof(image->url), "https://picsum.photos/seed/%u",
              (unsigned)(ctx->total_size / 1024u));
     UfsrvPromiseSetValue(ctx->promise, image, sFreeImage);
+    UfsrvPromiseDestroy(ctx->promise);
     free(ctx);
 
     UfsrvCoroutineExit();

@@ -51,8 +51,16 @@ struct UfsrvSchedulerPool
 {
   UfsrvScheduler **workers;
   int              worker_pool_sz;
-  _Atomic(int)     next;
+  _Atomic(unsigned) next;
   _Atomic(bool)    is_running;
 };
+
+extern __thread UfsrvScheduler *t_worker_scheduler;
+
+static inline bool
+UfsrvSchedulerIsOnWorkerThread(void)
+{
+  return t_worker_scheduler != NULL;
+}
 
 #endif /* UFSRVRXLIB_UFSRV_SCHEDULER_PRIV_H */

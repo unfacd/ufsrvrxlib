@@ -25,12 +25,16 @@
 #include <uflib/standard_defs.h>
 #include <uflib/standard_c_includes.h>
 
+#include <assert.h>
 #include <sys/eventfd.h>
 
 #include <ufsrvrxlib/ufsrv_future/ufsrv_future.h>
 #include <ufsrvrxlib/ufsrv_coroutine/ufsrv_coroutine.h>
+#include <ufsrvrxlib/ufsrv_scheduler/ufsrv_scheduler.h>
 
 #include "ufsrv_future_priv.h"
+#include "ufsrv_cancellation/ufsrv_cancellation_priv.h"
+#include "ufsrv_scheduler/ufsrv_scheduler_priv.h"
 
 /*!
  * @brief Release one reference to a continuation node.
@@ -43,6 +47,13 @@ sNodeRelease(struct UfsrvContinuation *node_ptr)
     if (lockless_treiber_stack_release(&node_ptr->base)) {
         free(node_ptr);
     }
+}
+
+static void
+sNodeDiscard(struct UfsrvContinuation *node_ptr)
+{
+    (void)lockless_treiber_stack_release(&node_ptr->base);
+    sNodeRelease(node_ptr);
 }
 
 /*!
@@ -65,10 +76,10 @@ sRunContinuation(UfsrvFuture *future_ptr, struct UfsrvContinuation *node_ptr)
  * @param[in,out] future_ptr  Future owning the stack.
  * @param[in]     node_ptr    Continuation to push.
  */
-static void
+static bool
 sPushContinuation(UfsrvFuture *future_ptr, struct UfsrvContinuation *node_ptr)
 {
-    lockless_treiber_stack_push(future_ptr->continuations, &node_ptr->base);
+    return lockless_treiber_stack_push(future_ptr->continuations, &node_ptr->base);
 }
 
 /*!
@@ -80,7 +91,7 @@ static void
 sDrainContinuations(UfsrvFuture *future_ptr)
 {
     struct LocklessTreiberStackNode *node_ptr =
-        lockless_treiber_stack_steal_all(future_ptr->continuations);
+        lockless_treiber_stack_steal_all_and_close(future_ptr->continuations);
 
     while (node_ptr != NULL) {
         struct LocklessTreiberStackNode *next_ptr =
@@ -101,24 +112,37 @@ static void
 sDrainWaiters(UfsrvFuture *future_ptr)
 {
     struct LocklessTreiberStackNode *node_ptr =
-        lockless_treiber_stack_steal_all(future_ptr->waiters);
+        lockless_treiber_stack_steal_all_and_close(future_ptr->waiters);
 
     while (node_ptr != NULL) {
         struct LocklessTreiberStackNode *next_ptr =
             atomic_load_explicit(&node_ptr->next, memory_order_relaxed);
         struct UfsrvWaiter *waiter = (struct UfsrvWaiter *)node_ptr;
         if (lockless_treiber_stack_claim(node_ptr)) {
-            if (waiter->block_fd >= 0) {
+            if (waiter->coroutine != NULL) {
+                if (!UfsrvCoroutineSubmitResume(waiter->scheduler, waiter->coroutine)) {
+                    /* Refused (scheduler stopped or OOM): the coroutine can never be
+                     * woken and would hang with a live stack copy — fail fast. */
+                    abort();
+                }
+            } else if (waiter->block_fd >= 0) {
                 uint64_t one = 1;
                 (void)write(waiter->block_fd, &one, sizeof(one));
-            } else {
-                UfsrvCoroutineSubmitResume(waiter->scheduler, waiter->coroutine);
             }
         }
         if (lockless_treiber_stack_release(node_ptr)) {
             free(waiter);
         }
         node_ptr = next_ptr;
+    }
+}
+
+static void
+sWaiterDiscard(struct UfsrvWaiter *waiter)
+{
+    (void)lockless_treiber_stack_release(&waiter->base);
+    if (lockless_treiber_stack_release(&waiter->base)) {
+        free(waiter);
     }
 }
 
@@ -146,8 +170,9 @@ sFutureComplete(UfsrvFuture *future_ptr, UfsrvFutureResult result)
     /* The future is now complete: release the cancel callback's registrant reference
      * (R) so the callback node can be reclaimed by a later cancel / token destroy.
      * This breaks the future↔callback reference cycle. */
-    if (future_ptr->cancel_handle != NULL) {
-        UfsrvCancellationTokenUnregister(future_ptr->cancel_handle);
+    void *handle = atomic_exchange_explicit(&future_ptr->cancel_handle, NULL, memory_order_acq_rel);
+    if (handle != NULL) {
+        UfsrvCancellationTokenUnregister(handle);
     }
 
     sDrainWaiters(future_ptr);
@@ -184,11 +209,13 @@ sFutureThen(UfsrvFuture *future_ptr, UfsrvFutureCallback fn, void *context_ptr)
     node_ptr->user = context_ptr;
     lockless_treiber_stack_node_init(&node_ptr->base);
 
-    sPushContinuation(future_ptr, node_ptr);
-
-    /* Completed while we pushed — claim-and-run to avoid a lost wakeup. */
-    if (atomic_load_explicit(&future_ptr->state, memory_order_acquire) == UFSRV_FUTURE_READY) {
-        sRunContinuation(future_ptr, node_ptr);
+    if (!sPushContinuation(future_ptr, node_ptr)) {
+        /* Refused: the list is closed, so the future completed before this push.
+         * The node was never linked — run it here and reclaim it ourselves. */
+        atomic_thread_fence(memory_order_acquire);
+        fn(&future_ptr->result, context_ptr);
+        sNodeDiscard(node_ptr);
+        return true;
     }
     sNodeRelease(node_ptr);
 
@@ -201,11 +228,18 @@ sFutureThen(UfsrvFuture *future_ptr, UfsrvFutureCallback fn, void *context_ptr)
  * @param[in,out] result_ptr   Source result (cleared after the move).
  * @param[in]     context_ptr  The output promise.
  */
+static bool
+sConsumeOnce(UfsrvFuture *future_ptr)
+{
+    return !atomic_exchange_explicit(&future_ptr->is_consumed, true, memory_order_acq_rel);
+}
+
 static void
 sMoveChainContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
 {
     UfsrvPromise *out_promise = context_ptr;
     UfsrvPromiseSetResult(out_promise, *result_ptr);
+    UfsrvPromiseDestroy(out_promise);
     *result_ptr = (UfsrvFutureResult){0};
 }
 
@@ -228,6 +262,7 @@ UfsrvPromiseCreate(UfsrvFuture **future_out)
     }
 
     atomic_init(&future_ptr->is_completed, false);
+    atomic_init(&future_ptr->is_consumed, false);
     atomic_init(&future_ptr->state, UFSRV_FUTURE_PENDING);
     future_ptr->continuations = lockless_treiber_stack_create();
     future_ptr->waiters = lockless_treiber_stack_create();
@@ -268,9 +303,6 @@ UfsrvPromiseSetResult(UfsrvPromise *promise_ptr, UfsrvFutureResult result)
             result.free_value(result.value);
         }
     }
-
-    UfsrvFutureRelease(future_ptr);
-    free(promise_ptr);
 }
 
 void
@@ -293,8 +325,8 @@ UfsrvPromiseDestroy(UfsrvPromise *promise_ptr)
     if (promise_ptr == NULL) {
         return;
     }
-    if (atomic_exchange_explicit(&promise_ptr->is_fulfilled, true, memory_order_acq_rel)) {
-        return;   /* already completed */
+    if (!atomic_exchange_explicit(&promise_ptr->is_fulfilled, true, memory_order_acq_rel)) {
+        sFutureComplete(promise_ptr->future, (UfsrvFutureResult){ .error = EPIPE, .value = NULL, .free_value = NULL });
     }
     UfsrvFutureRelease(promise_ptr->future);
     free(promise_ptr);
@@ -345,16 +377,12 @@ sFutureGetBlocking(UfsrvFuture *future_ptr)
     waiter->cancel_handle = NULL;
     lockless_treiber_stack_node_init(&waiter->base);
 
-    lockless_treiber_stack_push(future_ptr->waiters, &waiter->base);
-
-    if (atomic_load_explicit(&future_ptr->state, memory_order_acquire) == UFSRV_FUTURE_READY) {
-        if (lockless_treiber_stack_claim(&waiter->base)) {
-            /* Orphaned: the drainer never saw this waiter. Return without blocking.
-             * The waiter stays on the stack; UfsrvFutureRelease closes its fd. */
-            lockless_treiber_stack_release(&waiter->base);
-            return future_ptr->result;
-        }
-        /* The drainer claimed (wrote) us — fall through to read (returns immediately). */
+    if (!lockless_treiber_stack_push(future_ptr->waiters, &waiter->base)) {
+        /* Refused: the future completed before this push, so nothing will write the fd. */
+        atomic_thread_fence(memory_order_acquire);
+        close(waiter->block_fd);
+        sWaiterDiscard(waiter);
+        return future_ptr->result;
     }
 
     uint64_t value = 0;
@@ -385,6 +413,10 @@ UfsrvFutureGet(UfsrvFuture *future_ptr)
 
     UfsrvScheduler *scheduler = UfsrvCoroutineCurrentScheduler();
     if (scheduler == NULL) {
+        if (UfsrvSchedulerIsOnWorkerThread()) {
+            assert(!"blocking wait on a scheduler worker thread");
+            return (UfsrvFutureResult){ .error = EDEADLK, .value = NULL, .free_value = NULL };
+        }
         /* Plain thread (or a non-scheduler coroutine): block on an eventfd. */
         return sFutureGetBlocking(future_ptr);
     }
@@ -399,15 +431,11 @@ UfsrvFutureGet(UfsrvFuture *future_ptr)
     waiter->cancel_handle = NULL;
     lockless_treiber_stack_node_init(&waiter->base);
 
-    lockless_treiber_stack_push(future_ptr->waiters, &waiter->base);
-
-    if (atomic_load_explicit(&future_ptr->state, memory_order_acquire) == UFSRV_FUTURE_READY) {
-        if (lockless_treiber_stack_claim(&waiter->base)) {
-            /* Orphaned: the drainer never saw this waiter. Return without yielding. */
-            lockless_treiber_stack_release(&waiter->base);
-            return future_ptr->result;
-        }
-        /* The drainer claimed (resumed) us — fall through to yield. */
+    if (!lockless_treiber_stack_push(future_ptr->waiters, &waiter->base)) {
+        /* Refused: the future completed before this push, so nothing will resume us. */
+        atomic_thread_fence(memory_order_acquire);
+        sWaiterDiscard(waiter);
+        return future_ptr->result;
     }
 
     UfsrvCoroutineYield();
@@ -433,7 +461,9 @@ sResumeWaiterOnCancel(void *context_ptr)
     struct UfsrvWaiter *waiter = context_ptr;
 
     if (lockless_treiber_stack_claim(&waiter->base)) {
-        UfsrvCoroutineSubmitResume(waiter->scheduler, waiter->coroutine);
+        if (!UfsrvCoroutineSubmitResume(waiter->scheduler, waiter->coroutine)) {
+            abort();
+        }
     }
 }
 
@@ -498,11 +528,18 @@ sFutureGetBlockingCancellable(UfsrvFuture *future_ptr, UfsrvCancellationToken *t
     waiter->cancel_handle = NULL;
     lockless_treiber_stack_node_init(&waiter->base);
 
-    lockless_treiber_stack_push(future_ptr->waiters, &waiter->base);
+    if (!lockless_treiber_stack_push(future_ptr->waiters, &waiter->base)) {
+        /* Refused: the future completed before this push, so nothing will write the fd. */
+        atomic_thread_fence(memory_order_acquire);
+        close(waiter->block_fd);
+        waiter->block_fd = -1;
+        sWaiterDiscard(waiter);
+        return future_ptr->result;
+    }
 
     /* A third reference (pusher + stack + cancel) keeps the waiter alive while the
      * cancel callback may still write its fd. */
-    atomic_fetch_add_explicit(&waiter->base.refcount, 1, memory_order_relaxed);
+    lockless_treiber_stack_node_retain(&waiter->base);
 
     waiter->cancel_handle = UfsrvCancellationTokenRegisterEx(token_ptr, sWakeBlockingWaiterOnCancel, waiter, sWaiterCancelRelease);
     if (waiter->cancel_handle == NULL) {
@@ -515,35 +552,6 @@ sFutureGetBlockingCancellable(UfsrvFuture *future_ptr, UfsrvCancellationToken *t
         return (UfsrvFutureResult){ .error = -1, .value = NULL, .free_value = NULL };
     }
 
-    bool r_released = false;
-
-    /* Lost-wakeup guard (token): mirror UfsrvFutureGetWithCancellation. */
-    if (UfsrvCancellationTokenIsCancelled(token_ptr)) {
-        r_released = true;   /* Unregister below drops the registrant reference */
-        if (UfsrvCancellationTokenUnregister(waiter->cancel_handle)) {
-            /* We won: cancel won't run our callback. The callback node's registrant
-             * reference is released; its stack reference is reclaimed at token destroy. */
-            close(waiter->block_fd);
-            waiter->block_fd = -1;
-            lockless_treiber_stack_release(&waiter->base);   /* pusher ref */
-            return (UfsrvFutureResult){ .error = ECANCELED, .value = NULL, .free_value = NULL };
-        }
-        /* Cancel already claimed the callback and will write the fd — fall through. */
-    }
-
-    /* Lost-wakeup guard (future): mirror sFutureGetBlocking's orphan handling. */
-    if (atomic_load_explicit(&future_ptr->state, memory_order_acquire) == UFSRV_FUTURE_READY) {
-        if (lockless_treiber_stack_claim(&waiter->base)) {
-            /* Orphaned: the drainer never saw this waiter. Neutralise + return. */
-            if (!r_released) {
-                UfsrvCancellationTokenUnregister(waiter->cancel_handle);
-            }
-            lockless_treiber_stack_release(&waiter->base);   /* pusher ref */
-            return future_ptr->result;
-        }
-        /* The drainer claimed (wrote) us — fall through to read (returns immediately). */
-    }
-
     uint64_t value = 0;
     ssize_t n;
     do {
@@ -554,9 +562,7 @@ sFutureGetBlockingCancellable(UfsrvFuture *future_ptr, UfsrvCancellationToken *t
 
     close(waiter->block_fd);
     waiter->block_fd = -1;
-    if (!r_released) {
-        UfsrvCancellationTokenUnregister(waiter->cancel_handle);
-    }
+    UfsrvCancellationTokenUnregister(waiter->cancel_handle);
     if (lockless_treiber_stack_release(&waiter->base)) {
         free(waiter);
     }
@@ -584,6 +590,10 @@ UfsrvFutureGetWithCancellation(UfsrvFuture *future_ptr, UfsrvCancellationToken *
     }
 
     if (UfsrvCoroutineCurrentScheduler() == NULL) {
+        if (UfsrvSchedulerIsOnWorkerThread()) {
+            assert(!"blocking wait on a scheduler worker thread");
+            return (UfsrvFutureResult){ .error = EDEADLK, .value = NULL, .free_value = NULL };
+        }
         /* Plain thread: block on an eventfd and observe the token. */
         return sFutureGetBlockingCancellable(future_ptr, token_ptr);
     }
@@ -598,11 +608,16 @@ UfsrvFutureGetWithCancellation(UfsrvFuture *future_ptr, UfsrvCancellationToken *
     waiter->cancel_handle = NULL;
     lockless_treiber_stack_node_init(&waiter->base);
 
-    lockless_treiber_stack_push(future_ptr->waiters, &waiter->base);
+    if (!lockless_treiber_stack_push(future_ptr->waiters, &waiter->base)) {
+        /* Refused: the future completed before this push, so nothing will resume us. */
+        atomic_thread_fence(memory_order_acquire);
+        sWaiterDiscard(waiter);
+        return future_ptr->result;
+    }
 
     /* A third reference (pusher + stack + cancel) keeps the waiter alive while the
      * cancel callback may still resume it. */
-    atomic_fetch_add_explicit(&waiter->base.refcount, 1, memory_order_relaxed);
+    lockless_treiber_stack_node_retain(&waiter->base);
 
     waiter->cancel_handle = UfsrvCancellationTokenRegisterEx(token_ptr, sResumeWaiterOnCancel, waiter, sWaiterCancelRelease);
     if (waiter->cancel_handle == NULL) {
@@ -613,43 +628,9 @@ UfsrvFutureGetWithCancellation(UfsrvFuture *future_ptr, UfsrvCancellationToken *
         return (UfsrvFutureResult){ .error = -1, .value = NULL, .free_value = NULL };
     }
 
-    bool r_released = false;
-
-    /* Lost-wakeup guard (token): if cancelled concurrently with our registration,
-     * Cancel may have drained before our callback was pushed (orphaning it). Claim
-     * the callback to tell the two cases apart: winning means nobody will resume us. */
-    if (UfsrvCancellationTokenIsCancelled(token_ptr)) {
-        r_released = true;   /* Unregister below drops the registrant reference */
-        if (UfsrvCancellationTokenUnregister(waiter->cancel_handle)) {
-            /* We won: cancel won't run our callback. Drop the pusher reference; the
-             * stack reference (waiter is pushed) and cancel reference (reclaimed at
-             * token destroy) are released elsewhere. */
-            lockless_treiber_stack_release(&waiter->base);
-            return (UfsrvFutureResult){ .error = ECANCELED, .value = NULL, .free_value = NULL };
-        }
-        /* Cancel already claimed the callback and will resume us — fall through. */
-    }
-
-    /* Lost-wakeup guard (future): mirrors UfsrvFutureGet's orphan handling. */
-    if (atomic_load_explicit(&future_ptr->state, memory_order_acquire) == UFSRV_FUTURE_READY) {
-        if (lockless_treiber_stack_claim(&waiter->base)) {
-            /* Orphaned: the drainer never saw this waiter. Neutralise + return. */
-            if (!r_released) {
-                UfsrvCancellationTokenUnregister(waiter->cancel_handle);
-            }
-            lockless_treiber_stack_release(&waiter->base);
-            return future_ptr->result;
-        }
-        /* The drainer claimed (resumed) us — fall through to yield. */
-    }
-
     UfsrvCoroutineYield();
 
-    /* Resumed (by completion or by cancel). Neutralise the cancel callback (drops
-     * the registrant reference) and the waiter's pusher reference. */
-    if (!r_released) {
-        UfsrvCancellationTokenUnregister(waiter->cancel_handle);
-    }
+    UfsrvCancellationTokenUnregister(waiter->cancel_handle);
     if (lockless_treiber_stack_release(&waiter->base)) {
         free(waiter);
     }
@@ -669,6 +650,7 @@ UfsrvFutureFromValue(void *value_ptr, void (*free_value)(void *value_ptr))
         return NULL;
     }
     UfsrvPromiseSetValue(promise_ptr, value_ptr, free_value);
+    UfsrvPromiseDestroy(promise_ptr);
     return future_ptr;
 }
 
@@ -681,6 +663,7 @@ UfsrvFutureFromError(int error)
         return NULL;
     }
     UfsrvPromiseSetError(promise_ptr, error);
+    UfsrvPromiseDestroy(promise_ptr);
     return future_ptr;
 }
 
@@ -708,15 +691,15 @@ UfsrvFutureRelease(UfsrvFuture *future_ptr)
     }
 
     struct LocklessTreiberStackNode *node_ptr =
-        lockless_treiber_stack_steal_all(future_ptr->continuations);
+        lockless_treiber_stack_steal_all_and_close(future_ptr->continuations);
     while (node_ptr != NULL) {
         struct LocklessTreiberStackNode *next_ptr =
             atomic_load_explicit(&node_ptr->next, memory_order_relaxed);
-        free(node_ptr);   /* base is the first member → frees the continuation */
+        sNodeRelease((struct UfsrvContinuation *)node_ptr);
         node_ptr = next_ptr;
     }
 
-    node_ptr = lockless_treiber_stack_steal_all(future_ptr->waiters);
+    node_ptr = lockless_treiber_stack_steal_all_and_close(future_ptr->waiters);
     while (node_ptr != NULL) {
         struct LocklessTreiberStackNode *next_ptr =
             atomic_load_explicit(&node_ptr->next, memory_order_relaxed);
@@ -724,12 +707,20 @@ UfsrvFutureRelease(UfsrvFuture *future_ptr)
         if (waiter->block_fd >= 0) {
             close(waiter->block_fd);
         }
-        free(node_ptr);   /* base is the first member → frees the waiter */
+        if (lockless_treiber_stack_release(&waiter->base)) {
+            free(waiter);
+        }
         node_ptr = next_ptr;
     }
 
     lockless_treiber_stack_destroy(future_ptr->continuations);
     lockless_treiber_stack_destroy(future_ptr->waiters);
+
+    UfsrvCancellationToken *token_ptr =
+        atomic_exchange_explicit(&future_ptr->cancel_token, NULL, memory_order_acq_rel);
+    if (token_ptr != NULL) {
+        UfsrvCancellationTokenDestroy(token_ptr);
+    }
     free(future_ptr);
 }
 
@@ -763,14 +754,20 @@ UfsrvFutureAttachCancellation(UfsrvFuture *future_ptr, UfsrvCancellationToken *t
     if (future_ptr == NULL || token_ptr == NULL) {
         return false;
     }
-    if (future_ptr->cancel_token != NULL) {
-        return false;   /* one token per future */
-    }
-
     /* If the future is already completed, there is nothing left to cancel. */
     if (atomic_load_explicit(&future_ptr->is_completed, memory_order_acquire)) {
         return false;
     }
+
+    UfsrvCancellationToken *expected = NULL;
+    if (!atomic_compare_exchange_strong_explicit(&future_ptr->cancel_token, &expected, token_ptr,
+                                                memory_order_acq_rel, memory_order_acquire)) {
+        return false;   /* one token per future */
+    }
+
+    /* The future holds the token, so a caller that destroys its own reference does
+     * not free the token out from under this attachment. */
+    UfsrvCancellationTokenRetainInternal(token_ptr);
 
     /* The cancel reference keeps the future alive until the callback is reclaimed
      * (on cancel or token destroy), so a cancel after release is still safe. */
@@ -778,18 +775,21 @@ UfsrvFutureAttachCancellation(UfsrvFuture *future_ptr, UfsrvCancellationToken *t
 
     void *handle = UfsrvCancellationTokenRegisterEx(token_ptr, sFutureCancelCallback, future_ptr, sFutureCancelRelease);
     if (handle == NULL) {
-        UfsrvFutureRelease(future_ptr);   /* roll back the retain */
+        atomic_store_explicit(&future_ptr->cancel_token, NULL, memory_order_release);
+        UfsrvCancellationTokenDestroy(token_ptr);   /* roll back the token reference */
+        UfsrvFutureRelease(future_ptr);             /* roll back the retain */
         return false;
     }
 
-    future_ptr->cancel_handle = handle;
-    future_ptr->cancel_token = token_ptr;
+    atomic_store_explicit(&future_ptr->cancel_handle, handle, memory_order_release);
 
-    /* Lost-wakeup guard: if the token is already cancelled, Cancel may have drained
-     * before our callback was registered (orphaning it). Completing here is exactly-once
-     * (guarded by is_completed) and sFutureComplete reclaims the callback node. */
-    if (UfsrvCancellationTokenIsCancelled(token_ptr)) {
-        sFutureComplete(future_ptr, (UfsrvFutureResult){ .error = ECANCELED, .value = NULL, .free_value = NULL });
+    /* Completed inside the registration window: sFutureComplete read the handle as NULL
+     * and would never reclaim it, so do the same exchange here. */
+    if (atomic_load_explicit(&future_ptr->is_completed, memory_order_acquire)) {
+        void *stale = atomic_exchange_explicit(&future_ptr->cancel_handle, NULL, memory_order_acq_rel);
+        if (stale != NULL) {
+            UfsrvCancellationTokenUnregister(stale);
+        }
     }
 
     return true;
@@ -800,6 +800,7 @@ struct UfsrvMapContext {
     UfsrvPromise           *out_promise;
     UfsrvFutureMapCallback  mapper;
     void                   *user;
+    void                  (*free_value)(void *value_ptr);
 };
 
 static void
@@ -809,19 +810,23 @@ sMapContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
 
     if (result_ptr->error != 0) {
         UfsrvPromiseSetError(ctx->out_promise, result_ptr->error);
+        UfsrvPromiseDestroy(ctx->out_promise);
     } else {
         void *mapped = ctx->mapper(result_ptr->value, ctx->user);
         if (mapped == NULL) {
             UfsrvPromiseSetError(ctx->out_promise, -1);
+            UfsrvPromiseDestroy(ctx->out_promise);
         } else {
-            UfsrvPromiseSetValue(ctx->out_promise, mapped, free);
+            UfsrvPromiseSetValue(ctx->out_promise, mapped, ctx->free_value);
+            UfsrvPromiseDestroy(ctx->out_promise);
         }
     }
     free(ctx);
 }
 
-UfsrvFuture *
-UfsrvFutureMap(UfsrvFuture *future_ptr, UfsrvFutureMapCallback mapper, void *context_ptr)
+static UfsrvFuture *
+sFutureMap(UfsrvFuture *future_ptr, UfsrvFutureMapCallback mapper, void *context_ptr,
+           void (*free_value)(void *value_ptr))
 {
     if (future_ptr == NULL || mapper == NULL) {
         return NULL;
@@ -843,6 +848,7 @@ UfsrvFutureMap(UfsrvFuture *future_ptr, UfsrvFutureMapCallback mapper, void *con
     ctx->out_promise = out_promise;
     ctx->mapper = mapper;
     ctx->user = context_ptr;
+    ctx->free_value = free_value;
 
     if (!sFutureThen(future_ptr, sMapContinuation, ctx)) {
         free(ctx);
@@ -851,11 +857,25 @@ UfsrvFutureMap(UfsrvFuture *future_ptr, UfsrvFutureMapCallback mapper, void *con
         return NULL;
     }
 
-    if (future_ptr->cancel_token != NULL) {
-        UfsrvFutureAttachCancellation(out_future, future_ptr->cancel_token);
+    UfsrvCancellationToken *token = atomic_load_explicit(&future_ptr->cancel_token, memory_order_acquire);
+    if (token != NULL) {
+        UfsrvFutureAttachCancellation(out_future, token);
     }
 
     return out_future;
+}
+
+UfsrvFuture *
+UfsrvFutureMap(UfsrvFuture *future_ptr, UfsrvFutureMapCallback mapper, void *context_ptr)
+{
+    return sFutureMap(future_ptr, mapper, context_ptr, free);
+}
+
+UfsrvFuture *
+UfsrvFutureMapEx(UfsrvFuture *future_ptr, UfsrvFutureMapCallback mapper, void *context_ptr,
+                 void (*free_value)(void *value_ptr))
+{
+    return sFutureMap(future_ptr, mapper, context_ptr, free_value);
 }
 
 /*! Context for the flatMap continuation. */
@@ -863,8 +883,17 @@ struct UfsrvFlatMapContext {
     UfsrvPromise                *out_promise;
     UfsrvFutureFlatMapCallback   mapper;
     void                        *user;
-    UfsrvCancellationToken      *token;   /*!< Outer future's token (borrowed; may be NULL). */
+    UfsrvCancellationToken      *token;   /*!< Outer future's token (held; released on use). */
 };
+
+static void
+sDropContextToken(struct UfsrvFlatMapContext *ctx)
+{
+    if (ctx->token != NULL) {
+        UfsrvCancellationTokenDestroy(ctx->token);
+        ctx->token = NULL;
+    }
+}
 
 static void
 sFlatMapContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
@@ -873,6 +902,8 @@ sFlatMapContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
 
     if (result_ptr->error != 0) {
         UfsrvPromiseSetError(ctx->out_promise, result_ptr->error);
+        UfsrvPromiseDestroy(ctx->out_promise);
+        sDropContextToken(ctx);
         free(ctx);
         return;
     }
@@ -880,6 +911,8 @@ sFlatMapContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
     UfsrvFuture *next = ctx->mapper(result_ptr->value, ctx->user);
     if (next == NULL) {
         UfsrvPromiseSetError(ctx->out_promise, -1);
+        UfsrvPromiseDestroy(ctx->out_promise);
+        sDropContextToken(ctx);
         free(ctx);
         return;
     }
@@ -887,6 +920,15 @@ sFlatMapContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
     /* Propagate cancellation across the async boundary: cancel the inner future too. */
     if (ctx->token != NULL) {
         UfsrvFutureAttachCancellation(next, ctx->token);
+        sDropContextToken(ctx);
+    }
+
+    if (!sConsumeOnce(next)) {
+        UfsrvPromiseSetError(ctx->out_promise, EINVAL);
+        UfsrvPromiseDestroy(ctx->out_promise);
+        UfsrvFutureRelease(next);
+        free(ctx);
+        return;
     }
 
     sFutureThen(next, sMoveChainContinuation, ctx->out_promise);
@@ -917,7 +959,11 @@ UfsrvFutureFlatMap(UfsrvFuture *future_ptr, UfsrvFutureFlatMapCallback mapper, v
     ctx->out_promise = out_promise;
     ctx->mapper = mapper;
     ctx->user = context_ptr;
-    ctx->token = future_ptr->cancel_token;
+    ctx->token = atomic_load_explicit(&future_ptr->cancel_token, memory_order_acquire);
+    if (ctx->token != NULL) {
+        /* The continuation runs later; the caller may destroy its own reference first. */
+        UfsrvCancellationTokenRetainInternal(ctx->token);
+    }
 
     if (!sFutureThen(future_ptr, sFlatMapContinuation, ctx)) {
         free(ctx);
@@ -926,8 +972,9 @@ UfsrvFutureFlatMap(UfsrvFuture *future_ptr, UfsrvFutureFlatMapCallback mapper, v
         return NULL;
     }
 
-    if (future_ptr->cancel_token != NULL) {
-        UfsrvFutureAttachCancellation(out_future, future_ptr->cancel_token);
+    UfsrvCancellationToken *token = atomic_load_explicit(&future_ptr->cancel_token, memory_order_acquire);
+    if (token != NULL) {
+        UfsrvFutureAttachCancellation(out_future, token);
     }
 
     return out_future;
@@ -938,6 +985,7 @@ struct UfsrvOnErrorContext {
     UfsrvPromise               *out_promise;
     UfsrvFutureRecoverCallback  recovery;
     void                       *user;
+    UfsrvFuture                *in_future;
 };
 
 static void
@@ -949,9 +997,18 @@ sOnErrorContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
         UfsrvFuture *recovered = ctx->recovery(result_ptr->error, ctx->user);
         if (recovered == NULL) {
             UfsrvPromiseSetError(ctx->out_promise, result_ptr->error);
+            UfsrvPromiseDestroy(ctx->out_promise);
             free(ctx);
             return;
         }
+        if (!sConsumeOnce(recovered)) {
+            UfsrvPromiseSetError(ctx->out_promise, EINVAL);
+            UfsrvPromiseDestroy(ctx->out_promise);
+            UfsrvFutureRelease(recovered);
+            free(ctx);
+            return;
+        }
+
         sFutureThen(recovered, sMoveChainContinuation, ctx->out_promise);
         UfsrvFutureRelease(recovered);
         free(ctx);
@@ -959,8 +1016,15 @@ sOnErrorContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
     }
 
     /* Success: forward (move) the value unchanged. */
-    UfsrvPromiseSetResult(ctx->out_promise, *result_ptr);
-    *result_ptr = (UfsrvFutureResult){0};
+    if (!sConsumeOnce(ctx->in_future)) {
+        /* A second move operator already took this future's value. */
+        UfsrvPromiseSetError(ctx->out_promise, EINVAL);
+        UfsrvPromiseDestroy(ctx->out_promise);
+    } else {
+        UfsrvPromiseSetResult(ctx->out_promise, *result_ptr);
+        UfsrvPromiseDestroy(ctx->out_promise);
+        *result_ptr = (UfsrvFutureResult){0};
+    }
     free(ctx);
 }
 
@@ -987,6 +1051,7 @@ UfsrvFutureOnError(UfsrvFuture *future_ptr, UfsrvFutureRecoverCallback recovery,
     ctx->out_promise = out_promise;
     ctx->recovery = recovery;
     ctx->user = context_ptr;
+    ctx->in_future = future_ptr;
 
     if (!sFutureThen(future_ptr, sOnErrorContinuation, ctx)) {
         free(ctx);
@@ -995,8 +1060,9 @@ UfsrvFutureOnError(UfsrvFuture *future_ptr, UfsrvFutureRecoverCallback recovery,
         return NULL;
     }
 
-    if (future_ptr->cancel_token != NULL) {
-        UfsrvFutureAttachCancellation(out_future, future_ptr->cancel_token);
+    UfsrvCancellationToken *token = atomic_load_explicit(&future_ptr->cancel_token, memory_order_acquire);
+    if (token != NULL) {
+        UfsrvFutureAttachCancellation(out_future, token);
     }
 
     return out_future;
@@ -1007,6 +1073,7 @@ struct UfsrvDoOnSuccessContext {
     UfsrvPromise              *out_promise;
     UfsrvFutureActionCallback  action;
     void                      *user;
+    UfsrvFuture               *in_future;
 };
 
 static void
@@ -1019,8 +1086,14 @@ sDoOnSuccessContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
     }
 
     /* Forward (move) the result — value on success, error otherwise. */
-    UfsrvPromiseSetResult(ctx->out_promise, *result_ptr);
-    *result_ptr = (UfsrvFutureResult){0};
+    if (!sConsumeOnce(ctx->in_future)) {
+        UfsrvPromiseSetError(ctx->out_promise, EINVAL);
+        UfsrvPromiseDestroy(ctx->out_promise);
+    } else {
+        UfsrvPromiseSetResult(ctx->out_promise, *result_ptr);
+        UfsrvPromiseDestroy(ctx->out_promise);
+        *result_ptr = (UfsrvFutureResult){0};
+    }
     free(ctx);
 }
 
@@ -1047,6 +1120,7 @@ UfsrvFutureDoOnSuccess(UfsrvFuture *future_ptr, UfsrvFutureActionCallback action
     ctx->out_promise = out_promise;
     ctx->action = action;
     ctx->user = context_ptr;
+    ctx->in_future = future_ptr;
 
     if (!sFutureThen(future_ptr, sDoOnSuccessContinuation, ctx)) {
         free(ctx);
@@ -1055,8 +1129,9 @@ UfsrvFutureDoOnSuccess(UfsrvFuture *future_ptr, UfsrvFutureActionCallback action
         return NULL;
     }
 
-    if (future_ptr->cancel_token != NULL) {
-        UfsrvFutureAttachCancellation(out_future, future_ptr->cancel_token);
+    UfsrvCancellationToken *token = atomic_load_explicit(&future_ptr->cancel_token, memory_order_acquire);
+    if (token != NULL) {
+        UfsrvFutureAttachCancellation(out_future, token);
     }
 
     return out_future;
@@ -1075,12 +1150,14 @@ sAllContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
     struct UfsrvAllContext *ctx = context_ptr;
 
     if (result_ptr->error != 0 && !atomic_exchange_explicit(&ctx->failed, true, memory_order_acq_rel)) {
-        UfsrvPromiseSetError(ctx->out_promise, result_ptr->error);   /* fail-fast */
+        UfsrvPromiseSetError(ctx->out_promise, result_ptr->error);
+        UfsrvPromiseDestroy(ctx->out_promise);   /* fail-fast */
     }
 
     if (atomic_fetch_sub_explicit(&ctx->remaining, 1, memory_order_acq_rel) == 1) {
         if (!atomic_load_explicit(&ctx->failed, memory_order_acquire)) {
             UfsrvPromiseSetValue(ctx->out_promise, NULL, NULL);
+            UfsrvPromiseDestroy(ctx->out_promise);
         }
         free(ctx);
     }
@@ -1113,7 +1190,18 @@ UfsrvFutureAll(UfsrvFuture **futures, size_t count)
     atomic_init(&ctx->failed, false);
 
     for (size_t i = 0; i < count; i++) {
-        UfsrvFutureThen(futures[i], sAllContinuation, ctx);
+        if (UfsrvFutureThen(futures[i], sAllContinuation, ctx)) {
+            continue;
+        }
+        /* NULL input or refused registration: that input can never report, so the
+         * counter would never reach zero and the output would hang. Fail it here. */
+        if (!atomic_exchange_explicit(&ctx->failed, true, memory_order_acq_rel)) {
+            UfsrvPromiseSetError(ctx->out_promise, EINVAL);
+            UfsrvPromiseDestroy(ctx->out_promise);
+        }
+        if (atomic_fetch_sub_explicit(&ctx->remaining, 1, memory_order_acq_rel) == 1) {
+            free(ctx);
+        }
     }
 
     return out_future;
@@ -1126,14 +1214,29 @@ struct UfsrvAnyContext {
     _Atomic(size_t) remaining;
 };
 
+/*! One registration of an Any input, so the winner knows which future it consumed. */
+struct UfsrvAnyRegistration {
+    struct UfsrvAnyContext *ctx;
+    UfsrvFuture            *in_future;
+};
+
 static void
 sAnyContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
 {
-    struct UfsrvAnyContext *ctx = context_ptr;
+    struct UfsrvAnyRegistration *reg = context_ptr;
+    struct UfsrvAnyContext *ctx = reg->ctx;
+    UfsrvFuture *in_future = reg->in_future;
+    free(reg);
 
     if (!atomic_exchange_explicit(&ctx->claimed, true, memory_order_acq_rel)) {
-        UfsrvPromiseSetResult(ctx->out_promise, *result_ptr);
-        *result_ptr = (UfsrvFutureResult){0};   /* move: winner takes ownership */
+        if (!sConsumeOnce(in_future)) {
+            UfsrvPromiseSetError(ctx->out_promise, EINVAL);
+            UfsrvPromiseDestroy(ctx->out_promise);
+        } else {
+            UfsrvPromiseSetResult(ctx->out_promise, *result_ptr);
+            UfsrvPromiseDestroy(ctx->out_promise);
+            *result_ptr = (UfsrvFutureResult){0};   /* move: winner takes ownership */
+        }
     }
 
     if (atomic_fetch_sub_explicit(&ctx->remaining, 1, memory_order_acq_rel) == 1) {
@@ -1168,7 +1271,22 @@ UfsrvFutureAny(UfsrvFuture **futures, size_t count)
     atomic_init(&ctx->remaining, count);
 
     for (size_t i = 0; i < count; i++) {
-        UfsrvFutureThen(futures[i], sAnyContinuation, ctx);
+        struct UfsrvAnyRegistration *reg = calloc(1, sizeof(*reg));
+        if (reg != NULL) {
+            reg->ctx = ctx;
+            reg->in_future = futures[i];
+            if (UfsrvFutureThen(futures[i], sAnyContinuation, reg)) {
+                continue;
+            }
+            free(reg);
+        }
+        if (atomic_fetch_sub_explicit(&ctx->remaining, 1, memory_order_acq_rel) == 1) {
+            if (!atomic_load_explicit(&ctx->claimed, memory_order_acquire)) {
+                UfsrvPromiseSetError(ctx->out_promise, EINVAL);
+                UfsrvPromiseDestroy(ctx->out_promise);
+            }
+            free(ctx);
+        }
     }
 
     return out_future;
@@ -1179,27 +1297,39 @@ struct UfsrvZipContext {
     UfsrvPromise           *out_promise;
     UfsrvFutureZipCallback  zipper;
     void                   *user;
+    UfsrvFuture            *first_future;
+    UfsrvFuture            *second_future;
     UfsrvFutureResult       first;
     UfsrvFutureResult       second;
     _Atomic(size_t)           remaining;
+    void                   (*free_value)(void *value_ptr);
 };
 
 static void
 sZipComplete(struct UfsrvZipContext *ctx)
 {
+    UfsrvFuture *first_future = ctx->first_future;
+    UfsrvFuture *second_future = ctx->second_future;
+
     if (ctx->first.error != 0) {
         UfsrvPromiseSetError(ctx->out_promise, ctx->first.error);
+        UfsrvPromiseDestroy(ctx->out_promise);
     } else if (ctx->second.error != 0) {
         UfsrvPromiseSetError(ctx->out_promise, ctx->second.error);
+        UfsrvPromiseDestroy(ctx->out_promise);
     } else {
         void *zipped = ctx->zipper(ctx->first.value, ctx->second.value, ctx->user);
         if (zipped == NULL) {
             UfsrvPromiseSetError(ctx->out_promise, -1);
+            UfsrvPromiseDestroy(ctx->out_promise);
         } else {
-            UfsrvPromiseSetValue(ctx->out_promise, zipped, free);
+            UfsrvPromiseSetValue(ctx->out_promise, zipped, ctx->free_value);
+            UfsrvPromiseDestroy(ctx->out_promise);
         }
     }
     free(ctx);
+    UfsrvFutureRelease(first_future);
+    UfsrvFutureRelease(second_future);
 }
 
 static void
@@ -1222,8 +1352,9 @@ sZipSecondContinuation(UfsrvFutureResult *result_ptr, void *context_ptr)
     }
 }
 
-UfsrvFuture *
-UfsrvFutureZip(UfsrvFuture *future_a, UfsrvFuture *future_b, UfsrvFutureZipCallback zipper, void *context_ptr)
+static UfsrvFuture *
+sFutureZip(UfsrvFuture *future_a, UfsrvFuture *future_b, UfsrvFutureZipCallback zipper,
+           void *context_ptr, void (*free_value)(void *value_ptr))
 {
     if (future_a == NULL || future_b == NULL || zipper == NULL) {
         return NULL;
@@ -1244,7 +1375,15 @@ UfsrvFutureZip(UfsrvFuture *future_a, UfsrvFuture *future_b, UfsrvFutureZipCallb
     ctx->out_promise = out_promise;
     ctx->zipper = zipper;
     ctx->user = context_ptr;
+    ctx->first_future = future_a;
+    ctx->second_future = future_b;
+    ctx->free_value = free_value;
     atomic_init(&ctx->remaining, 2);
+
+    /* Both inputs are read when the zipper runs, which may be long after the caller
+     * released them — hold a reference until then. */
+    UfsrvFutureRetain(future_a);
+    UfsrvFutureRetain(future_b);
 
     if (!UfsrvFutureThen(future_a, sZipFirstContinuation, ctx) ||
         !UfsrvFutureThen(future_b, sZipSecondContinuation, ctx)) {
@@ -1254,4 +1393,17 @@ UfsrvFutureZip(UfsrvFuture *future_a, UfsrvFuture *future_b, UfsrvFutureZipCallb
     }
 
     return out_future;
+}
+
+UfsrvFuture *
+UfsrvFutureZip(UfsrvFuture *future_a, UfsrvFuture *future_b, UfsrvFutureZipCallback zipper, void *context_ptr)
+{
+    return sFutureZip(future_a, future_b, zipper, context_ptr, free);
+}
+
+UfsrvFuture *
+UfsrvFutureZipEx(UfsrvFuture *future_a, UfsrvFuture *future_b, UfsrvFutureZipCallback zipper,
+                 void *context_ptr, void (*free_value)(void *value_ptr))
+{
+    return sFutureZip(future_a, future_b, zipper, context_ptr, free_value);
 }

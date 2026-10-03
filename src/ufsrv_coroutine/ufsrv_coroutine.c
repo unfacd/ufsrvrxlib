@@ -40,12 +40,15 @@ static __thread UfsrvScheduler *t_current_scheduler = NULL;
 static pthread_key_t t_thread_state_key;
 static pthread_once_t t_thread_state_key_once = PTHREAD_ONCE_INIT;
 
+static void sReclaimUnstarted(void);
+
 /*!
  * @brief Free the calling thread's coroutine state (main co + shared stack).
  */
 static void
 sFreeThreadState(void)
 {
+    sReclaimUnstarted();
     if (t_share_stack != NULL) {
         aco_share_stack_destroy(t_share_stack);
         t_share_stack = NULL;
@@ -97,6 +100,72 @@ sEnsureThreadInit(void)
     t_initialized = true;
 }
 
+struct UfsrvCoroutineStart {
+    struct UfsrvCoroutineStart *prev;
+    struct UfsrvCoroutineStart *next;
+    UfsrvCoroutine             *coroutine;
+    UfsrvCoroutineEntry         entry;
+    void                       *arg;
+};
+
+static __thread struct UfsrvCoroutineStart *t_unstarted_head = NULL;
+
+static void
+sUnstartedLink(struct UfsrvCoroutineStart *node_ptr)
+{
+    node_ptr->prev = NULL;
+    node_ptr->next = t_unstarted_head;
+    if (t_unstarted_head != NULL) {
+        t_unstarted_head->prev = node_ptr;
+    }
+    t_unstarted_head = node_ptr;
+}
+
+static void
+sUnstartedUnlink(struct UfsrvCoroutineStart *node_ptr)
+{
+    if (node_ptr->prev != NULL) {
+        node_ptr->prev->next = node_ptr->next;
+    } else {
+        t_unstarted_head = node_ptr->next;
+    }
+    if (node_ptr->next != NULL) {
+        node_ptr->next->prev = node_ptr->prev;
+    }
+    node_ptr->prev = NULL;
+    node_ptr->next = NULL;
+}
+
+static void
+sReclaimUnstarted(void)
+{
+    while (t_unstarted_head != NULL) {
+        struct UfsrvCoroutineStart *node_ptr = t_unstarted_head;
+
+        sUnstartedUnlink(node_ptr);
+        if (node_ptr->coroutine != NULL) {
+            aco_destroy(node_ptr->coroutine);
+        }
+        free(node_ptr);
+    }
+}
+
+static void
+sCoroutineTrampoline(void)
+{
+    aco_t *co = aco_get_co();
+    struct UfsrvCoroutineStart *start_ptr = aco_get_arg();
+    UfsrvCoroutineEntry entry = start_ptr->entry;
+    void *arg_ptr = start_ptr->arg;
+
+    sUnstartedUnlink(start_ptr);
+    free(start_ptr);
+    co->arg = arg_ptr;
+
+    entry();
+    aco_exit();
+}
+
 UfsrvCoroutine *
 UfsrvCoroutineCreate(UfsrvCoroutineEntry entry, void *arg_ptr)
 {
@@ -105,7 +174,22 @@ UfsrvCoroutineCreate(UfsrvCoroutineEntry entry, void *arg_ptr)
     }
 
     sEnsureThreadInit();
-    return aco_create(t_main_co, t_share_stack, 0, entry, arg_ptr);
+
+    struct UfsrvCoroutineStart *start_ptr = malloc(sizeof(*start_ptr));
+    if (start_ptr == NULL) {
+        return NULL;
+    }
+    start_ptr->entry = entry;
+    start_ptr->arg = arg_ptr;
+
+    UfsrvCoroutine *co = aco_create(t_main_co, t_share_stack, 0, sCoroutineTrampoline, start_ptr);
+    if (co == NULL) {
+        free(start_ptr);
+        return NULL;
+    }
+    start_ptr->coroutine = co;
+    sUnstartedLink(start_ptr);
+    return co;
 }
 
 void
@@ -147,6 +231,14 @@ UfsrvCoroutineCurrentScheduler(void)
     return t_current_scheduler;
 }
 
+bool
+UfsrvCoroutineIsInCoroutine(void)
+{
+    aco_t *co = aco_get_co();
+
+    return t_initialized && co != NULL && co != t_main_co;
+}
+
 void
 UfsrvCoroutineExit(void)
 {
@@ -177,29 +269,33 @@ static void
 sResumeJob(void *context_ptr)
 {
     struct UfsrvResumeContext *ctx = context_ptr;
+    UfsrvScheduler *prev_scheduler = t_current_scheduler;
 
     t_current_scheduler = ctx->scheduler;
     UfsrvCoroutineResume(ctx->coroutine);
+    t_current_scheduler = prev_scheduler;
     free(ctx);
 }
 
-void
+bool
 UfsrvCoroutineSubmitResume(UfsrvScheduler *scheduler_ptr, UfsrvCoroutine *coroutine_ptr)
 {
     if (scheduler_ptr == NULL || coroutine_ptr == NULL) {
-        return;
+        return false;
     }
 
     struct UfsrvResumeContext *ctx = malloc(sizeof(*ctx));
     if (ctx == NULL) {
-        return;
+        return false;
     }
     ctx->scheduler = scheduler_ptr;
     ctx->coroutine = coroutine_ptr;
 
     if (!UfsrvSchedulerSubmit(scheduler_ptr, sResumeJob, ctx)) {
         free(ctx);
+        return false;
     }
+    return true;
 }
 
 /*! Spawn-job context: the target scheduler, entry, and its argument. */
@@ -218,6 +314,7 @@ static void
 sSpawnJob(void *context_ptr)
 {
     struct UfsrvSpawnContext *ctx = context_ptr;
+    UfsrvScheduler *prev_scheduler = t_current_scheduler;
 
     t_current_scheduler = ctx->scheduler;
 
@@ -225,6 +322,7 @@ sSpawnJob(void *context_ptr)
     if (co != NULL) {
         UfsrvCoroutineResume(co);   /* runs to first yield; destroys if it exits */
     }
+    t_current_scheduler = prev_scheduler;
     free(ctx);
 }
 

@@ -26,52 +26,102 @@
 #include <uflib/standard_c_includes.h>
 
 #include <ufsrvrxlib/ufsrv_cancellation/ufsrv_cancellation.h>
-#include <uflib/cdt/lockless_treiber_stack/lockless_treiber_stack.h>
 
-struct UfsrvCancellationToken {
-    _Atomic(bool)         is_cancelled;
-    LocklessTreiberStack *callbacks;   /*!< Opaque callback stack. */
-};
-
-/*! A registered one-shot callback node (embedded stack node + payload). */
-struct UfsrvCancellationCallback {
-    struct LocklessTreiberStackNode base;
-    UfsrvCancellationCallback         fn;
-    void                             *context;
-    UfsrvCancellationCallback         release_context;   /*!< Optional; runs on final free. */
-};
+#include "ufsrv_cancellation_priv.h"
 
 /*!
- * @brief Release one reference to a callback node; free it (and run its
- *        release-context hook) when the last reference drops.
+ * @brief Free a node and the token reference its registration handle held.
  *
- * @param[in,out] cb  Callback node to release.
+ * @param[in,out] cb  Node whose reference count has reached zero.
  */
 static void
-sReleaseCallback(struct UfsrvCancellationCallback *cb)
+sTokenRelease(UfsrvCancellationToken *token_ptr);
+
+static void
+sNodeFree(struct UfsrvCancellationCallback *cb)
 {
-    if (lockless_treiber_stack_release(&cb->base)) {
-        if (cb->release_context != NULL) {
-            cb->release_context(cb->context);
-        }
-        free(cb);
+    UfsrvCancellationToken *token_ptr = cb->token;
+    UfsrvCancellationCallback release_context = cb->release_context;
+    void *context_ptr = cb->context;
+
+    free(cb);
+    if (release_context != NULL) {
+        release_context(context_ptr);
     }
+    sTokenRelease(token_ptr);
+}
+
+/*!
+ * @brief Drop one node reference; free the node when that was the last.
+ *
+ * @param[in,out] cb  Node to release.
+ * @return true if this call freed the node.
+ */
+static bool
+sNodeDropRef(struct UfsrvCancellationCallback *cb)
+{
+    pthread_mutex_lock(&cb->token->lock);
+    bool last = (--cb->refcount == 0);
+    pthread_mutex_unlock(&cb->token->lock);
+
+    if (last) {
+        sNodeFree(cb);
+    }
+    return last;
+}
+
+static void
+sTokenRelease(UfsrvCancellationToken *token_ptr)
+{
+    if (atomic_fetch_sub_explicit(&token_ptr->refcount, 1, memory_order_acq_rel) != 1) {
+        return;
+    }
+
+    pthread_mutex_lock(&token_ptr->lock);
+    struct UfsrvCancellationCallback *node = token_ptr->head;
+    token_ptr->head = NULL;
+    pthread_mutex_unlock(&token_ptr->lock);
+
+    while (node != NULL) {
+        struct UfsrvCancellationCallback *next = node->next;
+        UfsrvCancellationCallback release_context = node->release_context;
+        void *context_ptr = node->context;
+
+        if (release_context != NULL) {
+            release_context(context_ptr);
+        }
+        free(node);
+        node = next;
+    }
+
+    pthread_mutex_destroy(&token_ptr->lock);
+    free(token_ptr);
+}
+
+void
+UfsrvCancellationTokenRetainInternal(UfsrvCancellationToken *token_ptr)
+{
+    if (unlikely(token_ptr == NULL)) {
+        return;
+    }
+    atomic_fetch_add_explicit(&token_ptr->refcount, 1, memory_order_relaxed);
 }
 
 UfsrvCancellationToken *
 UfsrvCancellationTokenCreate(void)
 {
-    UfsrvCancellationToken *token = calloc(1, sizeof(*token));
-    if (token == NULL) {
+    UfsrvCancellationToken *token_ptr = calloc(1, sizeof(*token_ptr));
+    if (token_ptr == NULL) {
         return NULL;
     }
-    atomic_init(&token->is_cancelled, false);
-    token->callbacks = lockless_treiber_stack_create();
-    if (token->callbacks == NULL) {
-        free(token);
+    if (pthread_mutex_init(&token_ptr->lock, NULL) != 0) {
+        free(token_ptr);
         return NULL;
     }
-    return token;
+    atomic_init(&token_ptr->refcount, 1);
+    atomic_init(&token_ptr->is_cancelled, false);
+    token_ptr->head = NULL;
+    return token_ptr;
 }
 
 void *
@@ -84,55 +134,111 @@ void *
 UfsrvCancellationTokenRegisterEx(UfsrvCancellationToken *token_ptr, UfsrvCancellationCallback callback,
                                  void *context_ptr, UfsrvCancellationCallback release_context)
 {
-    if (token_ptr == NULL || callback == NULL) {
+    if (unlikely(token_ptr == NULL || callback == NULL)) {
         return NULL;
     }
 
-    struct UfsrvCancellationCallback *cb = malloc(sizeof(*cb));
+    struct UfsrvCancellationCallback *cb = calloc(1, sizeof(*cb));
     if (cb == NULL) {
         return NULL;
     }
-    lockless_treiber_stack_node_init(&cb->base);
+
     cb->fn = callback;
     cb->context = context_ptr;
     cb->release_context = release_context;
-    lockless_treiber_stack_push(token_ptr->callbacks, &cb->base);
+    cb->token = token_ptr;
+    cb->refcount = 2;   /* the registration handle + the token's list */
+
+    UfsrvCancellationTokenRetainInternal(token_ptr);
+
+    pthread_mutex_lock(&token_ptr->lock);
+    bool already_cancelled = atomic_load_explicit(&token_ptr->is_cancelled, memory_order_acquire);
+    if (!already_cancelled) {
+        cb->next = token_ptr->head;
+        if (token_ptr->head != NULL) {
+            token_ptr->head->prev = cb;
+        }
+        token_ptr->head = cb;
+        cb->active = true;
+    } else {
+        cb->claimed = true;
+        cb->refcount = 1;   /* the token's list never took it */
+    }
+    pthread_mutex_unlock(&token_ptr->lock);
+
+    if (already_cancelled) {
+        callback(context_ptr);
+    }
     return cb;
 }
 
 bool
 UfsrvCancellationTokenUnregister(void *handle)
 {
-    if (handle == NULL) {
+    if (unlikely(handle == NULL)) {
         return false;
     }
+
     struct UfsrvCancellationCallback *cb = handle;
-    bool won = lockless_treiber_stack_claim(&cb->base);
-    sReleaseCallback(cb);
+    bool won = false;
+
+    pthread_mutex_lock(&cb->token->lock);
+    if (cb->active) {
+        cb->active = false;
+        cb->claimed = true;
+        if (cb->prev != NULL) {
+            cb->prev->next = cb->next;
+        } else {
+            cb->token->head = cb->next;
+        }
+        if (cb->next != NULL) {
+            cb->next->prev = cb->prev;
+        }
+        cb->prev = NULL;
+        cb->next = NULL;
+        --cb->refcount;   /* the token's list reference */
+        won = true;
+    }
+    bool last = (--cb->refcount == 0);
+    pthread_mutex_unlock(&cb->token->lock);
+
+    if (last) {
+        sNodeFree(cb);
+    }
     return won;
 }
 
 void
 UfsrvCancellationTokenCancel(UfsrvCancellationToken *token_ptr)
 {
-    if (token_ptr == NULL) {
-        return;
-    }
-    /* Idempotent: the acq_rel exchange makes the drain happen exactly once. */
-    if (atomic_exchange_explicit(&token_ptr->is_cancelled, true, memory_order_acq_rel)) {
+    if (unlikely(token_ptr == NULL)) {
         return;
     }
 
-    struct LocklessTreiberStackNode *node =
-        lockless_treiber_stack_steal_all(token_ptr->callbacks);
+    pthread_mutex_lock(&token_ptr->lock);
+    if (atomic_exchange_explicit(&token_ptr->is_cancelled, true, memory_order_acq_rel)) {
+        pthread_mutex_unlock(&token_ptr->lock);
+        return;
+    }
+
+    struct UfsrvCancellationCallback *node = token_ptr->head;
+    token_ptr->head = NULL;
+
+    /* The whole list is detached here; each node's list reference is dropped only
+     * after its callback has run, so Unregister cannot free a running node. */
+    for (struct UfsrvCancellationCallback *walk = node; walk != NULL; walk = walk->next) {
+        walk->active = false;
+        walk->claimed = true;
+        walk->prev = NULL;
+    }
+    pthread_mutex_unlock(&token_ptr->lock);
+
     while (node != NULL) {
-        struct LocklessTreiberStackNode *next =
-            atomic_load_explicit(&node->next, memory_order_relaxed);
-        struct UfsrvCancellationCallback *cb = (struct UfsrvCancellationCallback *)node;
-        if (lockless_treiber_stack_claim(node)) {
-            cb->fn(cb->context);
-        }
-        sReleaseCallback(cb);   /* drop the token-stack reference */
+        struct UfsrvCancellationCallback *next = node->next;
+
+        node->fn(node->context);
+        node->next = NULL;
+        sNodeDropRef(node);
         node = next;
     }
 }
@@ -140,7 +246,7 @@ UfsrvCancellationTokenCancel(UfsrvCancellationToken *token_ptr)
 bool
 UfsrvCancellationTokenIsCancelled(const UfsrvCancellationToken *token_ptr)
 {
-    if (token_ptr == NULL) {
+    if (unlikely(token_ptr == NULL)) {
         return false;
     }
     return atomic_load_explicit(&token_ptr->is_cancelled, memory_order_acquire);
@@ -149,24 +255,8 @@ UfsrvCancellationTokenIsCancelled(const UfsrvCancellationToken *token_ptr)
 void
 UfsrvCancellationTokenDestroy(UfsrvCancellationToken *token_ptr)
 {
-    if (token_ptr == NULL) {
+    if (unlikely(token_ptr == NULL)) {
         return;
     }
-
-    /* Reclaim dead callback nodes still linked in the stack (see design Known
-     * Issues: a Treiber stack has no remove, so completed-but-un-cancelled waiters
-     * leave their callback nodes here until cancel/destroy). */
-    struct LocklessTreiberStackNode *node =
-        lockless_treiber_stack_steal_all(token_ptr->callbacks);
-    while (node != NULL) {
-        struct LocklessTreiberStackNode *next =
-            atomic_load_explicit(&node->next, memory_order_relaxed);
-        struct UfsrvCancellationCallback *cb = (struct UfsrvCancellationCallback *)node;
-        lockless_treiber_stack_claim(node);
-        sReleaseCallback(cb);   /* drop the token-stack reference */
-        node = next;
-    }
-
-    lockless_treiber_stack_destroy(token_ptr->callbacks);
-    free(token_ptr);
+    sTokenRelease(token_ptr);
 }

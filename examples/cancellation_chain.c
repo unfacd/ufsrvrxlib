@@ -83,6 +83,7 @@ main(void)
     int *user_id = malloc(sizeof(*user_id));
     *user_id = 42;
     UfsrvPromiseSetValue(src_promise, user_id, free);
+    UfsrvPromiseDestroy(src_promise);
 
     printf("orders query pending before cancel: %s\n",
            UfsrvFutureIsReady(orders_ctx.inner_future) ? "no" : "yes");

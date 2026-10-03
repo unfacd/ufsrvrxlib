@@ -1,4 +1,4 @@
-.TH UFSRVRXLIB 7 "September 2026" "ufsrvrxlib 0.1.19" "UFSRV Programmer's Manual"
+.TH UFSRVRXLIB 7 "October 2026" "ufsrvrxlib 0.2.0" "UFSRV Programmer's Manual"
 .\" ---------------------------------------------------------------------------
 .SH NAME
 ufsrvrxlib \- ufsrv reactive-extensions library (coroutines, futures, scheduler)
@@ -9,6 +9,7 @@ ufsrvrxlib \- ufsrv reactive-extensions library (coroutines, futures, scheduler)
 .B #include <ufsrvrxlib/ufsrv_coroutine/ufsrv_coroutine.h>
 .B #include <ufsrvrxlib/ufsrv_scheduler/ufsrv_scheduler.h>
 .B #include <ufsrvrxlib/ufsrv_cancellation/ufsrv_cancellation.h>
+.B #include <ufsrvrxlib/version.h>
 .fi
 .sp
 Link with
@@ -33,7 +34,7 @@ API user code \(em fluent chains or await-style reads.
 .TP
 .B \(bu L3
 .B Coroutines
-\(em stackful suspend/resume (a thin wrapper over libaco, vendored at packages/libaco).
+\(em stackful suspend/resume (a thin wrapper over libaco).
 .TP
 .B \(bu L4
 .B Scheduler / threads
@@ -85,6 +86,19 @@ Pool variants mirror these and add
 .BR UfsrvSchedulerPoolDestroy ,
 and
 .BR UfsrvSchedulerPoolSize .
+.PP
+Two introspection helpers describe a pool without linking json-c:
+.TP
+.B DescribeScheduler(pool, worker_name, bd)
+Render the pool and its workers as JSON into a BufferDescriptor; a non-NULL
+.I worker_name
+selects one exact worker.  Pass a pre-initialised descriptor, or NULL to have one
+allocated (256-byte initial capacity).
+.TP
+.B ListSchedulerWorkers(pool)
+Every worker name, in pool order, carved from one allocation; release the returned
+CollectionDescriptor with a single
+.BR free (3).
 .\" ===================================================
 .SS Coroutines \&(L3) \(em \fBufsrv_coroutine\fP
 Stackful coroutines: a body runs until it
@@ -113,11 +127,20 @@ The entry argument.
 .B UfsrvCoroutineCurrentScheduler()
 The scheduler the coroutine is pinned to (NULL if none).
 .TP
+.B UfsrvCoroutineIsInCoroutine()
+Test whether the caller is inside a coroutine rather than the thread's main
+coroutine.
+.TP
 .B UfsrvCoroutineExit()
-Terminate the coroutine (does not return).
+Terminate the coroutine (does not return).  A plain
+.B return
+from the entry does the same thing.
 .TP
 .B UfsrvCoroutineThreadCleanup()
-Release the calling thread's coroutine state.
+Release the calling thread's coroutine state, reclaiming any coroutine created on
+this thread but never resumed (its handle is invalid afterwards).  Coroutines that
+have been resumed must have exited first; the state is also released at thread exit
+by a TLS destructor.
 .TP
 .B UfsrvCoroutineSubmitResume(s, co)
 Re-submit a suspended coroutine for resumption.
@@ -139,16 +162,23 @@ it (copy-then-zero), so a value is freed exactly once.
 Create a linked promise/future pair.
 .TP
 .B UfsrvPromiseSetValue(p, v, free)
-Fulfil with a success value (frees the promise).
+Fulfil with a success value (ownership of
+.I v
+transferred).  Does
+.I not
+free the promise.
 .TP
 .B UfsrvPromiseSetError(p, err)
-Fulfil with an error.
+Fulfil with an error.  Does not free the promise.
 .TP
 .B UfsrvPromiseSetResult(p, result)
-Fulfil with a full result.
+Fulfil with a full result.  Does not free the promise.
 .TP
 .B UfsrvPromiseDestroy(p)
-Abandon without completing.
+Release the promise, fulfilled or not.  Destroying an
+.I unfulfilled
+promise completes its future with
+.BR EPIPE .
 .TP
 .B UfsrvFutureThen(f, cb, ctx)
 Register a terminal (borrow) continuation.
@@ -157,10 +187,15 @@ Register a terminal (borrow) continuation.
 Query completion.
 .TP
 .B UfsrvFutureGet(f)
-Cooperatively await the result (suspends a coroutine, blocks a plain thread).
+Await the result: suspends a coroutine, blocks a plain thread on an eventfd.  On a
+scheduler worker thread outside a coroutine it refuses, returning
+.BR EDEADLK
+(asserting in debug builds), because blocking there would park the worker.
 .TP
 .B UfsrvFutureGetWithCancellation(f, token)
-Await, honouring a cancellation token.
+Await, honouring a cancellation token; returns
+.B ECANCELED
+if it is already cancelled, and is woken if it is cancelled during the wait.
 .TP
 .B UfsrvFutureAttachCancellation(f, token)
 Bind a token so cancel completes the future with
@@ -173,7 +208,16 @@ An already-completed successful future.
 An already-completed failed future.
 .TP
 .B UfsrvFutureMap(f, mapper, ctx)
-Synchronous transform (borrow; new value).
+Synchronous transform (borrow; new value, released with
+.BR free (3)).
+.TP
+.B UfsrvFutureMapEx(f, mapper, ctx, free_value)
+As
+.BR UfsrvFutureMap ,
+but the mapper's value is released with
+.IR free_value .
+Pass NULL to keep ownership in the caller.  Use it whenever the mapper returns a
+pooled, arena-backed or refcounted object.
 .TP
 .B UfsrvFutureFlatMap(f, mapper, ctx)
 Chain another asynchronous operation (move).
@@ -188,7 +232,13 @@ Run a success-only side effect, then forward.
 Wait for all (fail-fast).
 .TP
 .B UfsrvFutureZip(a, b, zipper, ctx)
-Combine two.
+Combine two; the combined value is released with
+.BR free (3).
+.TP
+.B UfsrvFutureZipEx(a, b, zipper, ctx, free_value)
+As
+.BR UfsrvFutureZip ,
+with an explicit destructor for the combined value.
 .TP
 .B UfsrvFutureAny(futures, n)
 Complete with the first to finish.
@@ -197,11 +247,12 @@ Complete with the first to finish.
 Reference counting.
 .\" ===================================================
 .SS Cancellation \(em \fBufsrv_cancellation\fP
-Cooperative cancellation tokens.  A token keeps a lock-free registry of
+Cooperative cancellation tokens.  A token keeps a mutex-guarded intrusive list of
 one-shot callbacks;
 .B UfsrvCancellationTokenCancel
-drains and runs them, waking any waiter (resume-on-cancel).  Cancellation is
-never pre-emptive: it is observed at yield points.
+detaches and runs them on the cancelling thread, waking any waiter
+(resume-on-cancel).  Cancellation is never pre-emptive: it is observed at yield
+points.
 .PP
 .TP
 .B UfsrvCancellationTokenCreate()
@@ -220,10 +271,21 @@ Register a one-shot callback.
 Register with a context-release hook.
 .TP
 .B UfsrvCancellationTokenUnregister(handle)
-Neutralise a callback and drop the registrant reference.
+Claim the callback so a later Cancel will not run it, drop the registrant's
+reference and reclaim the node; returns false if Cancel had already run it.  The
+handle is
+.I single-use
+and is dead afterwards \(em a second call with it dereferences freed memory.  Calling
+this exactly once per handle is
+.IR mandatory :
+.B UfsrvCancellationTokenCancel
+detaches a node before dispatching it, so a registration that is never unregistered
+is never reclaimed, not even by
+.BR UfsrvCancellationTokenDestroy ,
+which walks a list that no longer contains it.
 .TP
 .B UfsrvCancellationTokenDestroy(token)
-Reclaim the token and any dead callback nodes.
+Release the caller's reference to the token and reclaim the nodes still on its list.
 .\" ===================================================
 .SS Lock-free Treiber stack \(em \fBlockless_treiber_stack\fP
 The reusable intrusive lock-free LIFO stack the future layer builds on, now
@@ -263,14 +325,25 @@ Individual components.
 .B One-shot promise
 The first
 .B UfsrvPromiseSet*
-wins and frees the promise; use
-.B UfsrvPromiseDestroy
-only to abandon.
+wins, and none of them frees the promise \(em always call
+.BR UfsrvPromiseDestroy ,
+fulfilled or not.  Destroying an unfulfilled promise completes its future with
+.BR EPIPE ,
+so an abandoned promise is reported rather than left hanging.
 .TP
 .B The future owns the value
 Freed at reference-count zero via its
 .I free_value
-hook.
+hook.  The one value the library produces rather than receives is a mapper's or
+zipper's return: that is released with
+.BR free (3)
+by
+.BR UfsrvFutureMap / UfsrvFutureZip ,
+so those callbacks may only return a
+.B malloc
+block.  Use
+.B UfsrvFutureMapEx / UfsrvFutureZipEx
+to supply the destructor for anything else, or pass NULL to keep ownership.
 .B UfsrvFutureGet
 and
 .B UfsrvFutureThen
@@ -303,10 +376,19 @@ woken; a plain thread's eventfd is written).
 .B UfsrvFutureAttachCancellation
 completes the future with
 .B ECANCELED
-when the token fires, and single-input operators inherit the token onto their
-output.  A token that outlives its waiters accumulates reclaimed-only-at-destroy
-callback nodes; prefer short-lived tokens and always
-.BR UfsrvCancellationTokenDestroy .
+when the token fires, and single-input operators (map, flatMap, onError,
+doOnSuccess) inherit the token onto their output \(em flatMap also onto the future its
+mapper returns.  The future retains itself and holds its own reference on the token
+until it completes, so a cancel after the future is released is still safe.
+.PP
+A registration node is reclaimed the moment its handle is consumed, so the rule for
+raw
+.B UfsrvCancellationTokenRegister
+users is: consume every handle exactly once with
+.BR UfsrvCancellationTokenUnregister ,
+whether or not Cancel already ran the callback.  And always
+.BR UfsrvCancellationTokenDestroy
+your own token reference.
 .\" ---------------------------------------------------------------------------
 .SH RETURN VALUES
 Functions returning
@@ -314,39 +396,77 @@ Functions returning
 report success (non-NULL arguments, allocation success, acceptance by a running
 scheduler).  A future result carries
 .IR error
-(0 for success, or
+and a borrowed
+.IR value ;
+the codes are:
+.TP
+.B 0
+Success.
+.TP
 .B ECANCELED
-on cancellation) and a borrowed
-.IR value .
-Operators propagate the first error downstream.
+The token was cancelled.
+.TP
+.B EPIPE
+Broken promise \(em the promise was destroyed unfulfilled.
+.TP
+.B EINVAL
+A move operator found its input already consumed, or
+.B UfsrvFutureAll
+was handed a NULL input.
+.TP
+.B EDEADLK
+A blocking get was attempted on a scheduler worker thread.
+.TP
+.B \-1
+Allocation failure, a NULL argument, or a mapper/zipper that returned NULL.
+.PP
+Operators propagate the first error downstream; map, flatMap and zip never run
+their callbacks on an error input.
 .\" ---------------------------------------------------------------------------
 .SH EXAMPLE
 .nf
-UfsrvScheduler *s = UfsrvSchedulerCreate("worker");
-UfsrvSchedulerStart(s);
+static void
+download_entry(void)
+{
+    UfsrvPromise *p = UfsrvCoroutineGetArg();
 
-UfsrvFuture *f = NULL;
-UfsrvPromise *p = UfsrvPromiseCreate(&f);
-UfsrvFutureThen(f, on_done, NULL);            /* observe completion */
+    UfsrvPromiseSetValue(p, produce_result(), free);  /* completes the future */
+    UfsrvPromiseDestroy(p);                           /* Set* does not free it */
+}
 
-UfsrvCoroutineSpawn(s, download_entry, p);    /* do the work asynchronously */
-UfsrvFutureResult r = UfsrvFutureGet(f);      /* block/suspend until ready */
+int
+main(void)
+{
+    UfsrvScheduler *s = UfsrvSchedulerCreate("worker");
+    UfsrvSchedulerStart(s);
 
-UfsrvFutureRelease(f);
-UfsrvSchedulerStop(s);
-UfsrvSchedulerJoin(s);
-UfsrvSchedulerDestroy(s);
+    UfsrvFuture *f = NULL;
+    UfsrvPromise *p = UfsrvPromiseCreate(&f);
+    UfsrvFutureThen(f, on_done, NULL);            /* observe completion */
+
+    UfsrvCoroutineSpawn(s, download_entry, p);    /* do the work asynchronously */
+    UfsrvFutureResult r = UfsrvFutureGet(f);      /* block/suspend until ready */
+    if (r.error == 0) { use(r.value); }           /* borrowed: do not free */
+
+    UfsrvFutureRelease(f);
+    UfsrvSchedulerStop(s);
+    UfsrvSchedulerJoin(s);
+    UfsrvSchedulerDestroy(s);
+    return 0;
+}
 .fi
 See also the runnable programs under
 .IR examples/ .
 .\" ---------------------------------------------------------------------------
 .SH SEE ALSO
-.BR ufsrvrxlib (3)
-(future pages),
-.IR include/ufsrvrxlib/ " — the authoritative header declarations."
+The companion API guide,
+.IR UFSRVRXLIB_API_GUIDE.md ,
+describes every public function with its ownership, threading and error contracts,
+and worked recipes.
 .sp
-The design document:
-.IR dev/technical_designs/UFSRVRXLIB_DESIGN.md .
+The authoritative declarations are the installed headers under
+.IR <ufsrvrxlib/> ,
+one directory per module.
 .\" ---------------------------------------------------------------------------
 .SH AUTHOR
 unfacd works.

@@ -47,6 +47,7 @@ sDownloadEntry(void)
         strcpy(url, "https://example.com/image.jpg");
     }
     UfsrvPromiseSetValue(ctx->promise, url, free);
+    UfsrvPromiseDestroy(ctx->promise);
     free(ctx);
 
     UfsrvCoroutineExit();

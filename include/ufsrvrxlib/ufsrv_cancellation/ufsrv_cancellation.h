@@ -92,7 +92,15 @@ PUBLIC_API void *UfsrvCancellationTokenRegisterEx(
  * @brief Unregister (neutralise) a registered callback.
  *
  * Claims the callback so a later Cancel will not run it, and drops the
- * registrant's reference. Idempotent — safe to call more than once.
+ * registrant's reference. Must be called exactly once per registration, whether
+ * or not Cancel has already dispatched the callback: dropping that reference is
+ * what reclaims the registration node, and a registration that is never
+ * unregistered is never reclaimed — not even by UfsrvCancellationTokenDestroy,
+ * which cannot reach a node Cancel has already detached.
+ *
+ * Not idempotent. The handle is consumed and invalidated by this call; calling
+ * it again with the same handle dereferences freed memory (use-after-free).
+ * Treat the handle as a single-use token: call it once and discard it.
  *
  * @param[in] handle  Handle from UfsrvCancellationTokenRegister (NULL → false).
  * @return true if this call neutralised the callback (Cancel had not run it yet),

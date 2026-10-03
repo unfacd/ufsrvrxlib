@@ -44,11 +44,13 @@ typedef struct UfsrvFutureResult {
 typedef void (*UfsrvFutureCallback)(UfsrvFutureResult *result_ptr, void *context_ptr);
 
 /*!
- * Synchronous value transform for UfsrvFutureMap. Borrows the input value.
+ * Synchronous value transform for UfsrvFutureMap / UfsrvFutureMapEx. Borrows the
+ * input value. The returned value is owned by the mapped future and freed with
+ * `free` by UfsrvFutureMap, or with the destructor passed to UfsrvFutureMapEx.
  *
  * @param[in] value_ptr    Success value (borrowed).
  * @param[in] context_ptr  User context.
- * @return A new value owned by the mapped future (freed with `free`), or NULL.
+ * @return A new value owned by the mapped future, or NULL.
  */
 typedef void *(*UfsrvFutureMapCallback)(const void *value_ptr, void *context_ptr);
 
@@ -79,12 +81,14 @@ typedef UfsrvFuture *(*UfsrvFutureRecoverCallback)(int error, void *context_ptr)
 typedef void (*UfsrvFutureActionCallback)(const void *value_ptr, void *context_ptr);
 
 /*!
- * Zipper for UfsrvFutureZip: combine two success values into a new value.
+ * Zipper for UfsrvFutureZip / UfsrvFutureZipEx: combine two success values into a
+ * new value. That value is owned by the zip result and freed with `free` by
+ * UfsrvFutureZip, or with the destructor passed to UfsrvFutureZipEx.
  *
  * @param[in] value_a_ptr  First value (borrowed).
  * @param[in] value_b_ptr  Second value (borrowed).
  * @param[in] context_ptr  User context.
- * @return A new value owned by the zip result (freed with `free`), or NULL.
+ * @return A new value owned by the zip result, or NULL.
  */
 typedef void *(*UfsrvFutureZipCallback)(const void *value_a_ptr, const void *value_b_ptr, void *context_ptr);
 

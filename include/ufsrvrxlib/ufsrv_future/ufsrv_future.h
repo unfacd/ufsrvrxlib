@@ -17,7 +17,8 @@
  *
  * UfsrvFuture *mapped = UfsrvFutureMap(future, transform, NULL);
  * UfsrvFutureThen(mapped, on_done, NULL);       // terminal
- * UfsrvPromiseSetValue(promise, payload, free); // completes + frees promise
+ * UfsrvPromiseSetValue(promise, payload, free); // completes the future
+ * UfsrvPromiseDestroy(promise);                 // releases the promise
  *
  * UfsrvFutureRelease(mapped);
  * UfsrvFutureRelease(future);
@@ -39,8 +40,8 @@ extern "C" {
  * @brief Create a linked promise/future pair.
  *
  * The future is returned with reference count 2 (one for the promise, one for
- * the caller). The promise must be completed with UfsrvPromiseSet* or abandoned
- * with UfsrvPromiseDestroy.
+ * the caller). The promise must be destroyed with UfsrvPromiseDestroy once it is
+ * fulfilled or abandoned.
  *
  * @param[out] future_out  Receives the future (must be non-NULL; owned by caller).
  * @return A new UfsrvPromise, or NULL on NULL future_out / allocation failure.
@@ -48,7 +49,9 @@ extern "C" {
 PUBLIC_API UfsrvPromise *UfsrvPromiseCreate(UfsrvFuture **future_out);
 
 /*!
- * @brief Complete the promise with a success value (one-shot; frees the promise).
+ * @brief Complete the promise with a success value (one-shot).
+ *
+ * Does not free the promise: the caller must call UfsrvPromiseDestroy.
  *
  * @param[in,out] promise_ptr  Promise to complete.
  * @param[in]     value_ptr    Success value (ownership transferred).
@@ -57,7 +60,9 @@ PUBLIC_API UfsrvPromise *UfsrvPromiseCreate(UfsrvFuture **future_out);
 PUBLIC_API void UfsrvPromiseSetValue(UfsrvPromise *promise_ptr, void *value_ptr, void (*free_value)(void *value_ptr));
 
 /*!
- * @brief Complete the promise with an error (one-shot; frees the promise).
+ * @brief Complete the promise with an error (one-shot).
+ *
+ * Does not free the promise: the caller must call UfsrvPromiseDestroy.
  *
  * @param[in,out] promise_ptr  Promise to complete.
  * @param[in]     error        Non-zero error code.
@@ -65,7 +70,9 @@ PUBLIC_API void UfsrvPromiseSetValue(UfsrvPromise *promise_ptr, void *value_ptr,
 PUBLIC_API void UfsrvPromiseSetError(UfsrvPromise *promise_ptr, int error);
 
 /*!
- * @brief Complete the promise with a full result (one-shot; frees the promise).
+ * @brief Complete the promise with a full result (one-shot).
+ *
+ * Does not free the promise: the caller must call UfsrvPromiseDestroy.
  *
  * @param[in,out] promise_ptr  Promise to complete.
  * @param[in]     result       Result (ownership transferred to the future).
@@ -73,10 +80,10 @@ PUBLIC_API void UfsrvPromiseSetError(UfsrvPromise *promise_ptr, int error);
 PUBLIC_API void UfsrvPromiseSetResult(UfsrvPromise *promise_ptr, UfsrvFutureResult result);
 
 /*!
- * @brief Abandon the promise without completing it (frees the promise).
+ * @brief Release the promise; an unfulfilled one completes its future with EPIPE.
  *
- * The future remains valid but never completes; the caller still owns its
- * reference and must release it. Must not be called after UfsrvPromiseSet*.
+ * Every promise must be destroyed, whether or not it was fulfilled — UfsrvPromiseSet*
+ * no longer frees it. The caller still owns the future's reference and must release it.
  *
  * @param[in,out] promise_ptr  Promise to abandon.
  */
@@ -178,6 +185,24 @@ PUBLIC_API UfsrvFuture *UfsrvFutureFromError(int error);
 PUBLIC_API UfsrvFuture *UfsrvFutureMap(UfsrvFuture *future_ptr, UfsrvFutureMapCallback mapper, void *context_ptr);
 
 /*!
+ * @brief Synchronously transform the success value, with an explicit destructor.
+ *
+ * Identical to UfsrvFutureMap except that the value the mapper returns is released
+ * with @p free_value when the mapped future is released, instead of `free`. Use it
+ * whenever the mapper returns anything that is not a plain `malloc` block — a pooled,
+ * arena-backed or refcounted object. Passing NULL means the value is never released
+ * by the library and the caller retains ownership of it.
+ *
+ * @param[in,out] future_ptr   Input future.
+ * @param[in]     mapper       Transform (non-NULL).
+ * @param[in]     context_ptr  Opaque context passed to the mapper.
+ * @param[in]     free_value   Releases the mapped value; may be NULL.
+ * @return A new future, or NULL on allocation failure.
+ */
+PUBLIC_API UfsrvFuture *UfsrvFutureMapEx(UfsrvFuture *future_ptr, UfsrvFutureMapCallback mapper,
+                                         void *context_ptr, void (*free_value)(void *value_ptr));
+
+/*!
  * @brief Chain another asynchronous operation (move).
  *
  * On success, calls the mapper with the value; the mapper's returned inner
@@ -240,6 +265,25 @@ PUBLIC_API UfsrvFuture *UfsrvFutureAll(UfsrvFuture **futures, size_t count);
  * @return A new future, or NULL on invalid arguments / allocation failure.
  */
 PUBLIC_API UfsrvFuture *UfsrvFutureZip(UfsrvFuture *future_a, UfsrvFuture *future_b, UfsrvFutureZipCallback zipper, void *context_ptr);
+
+/*!
+ * @brief Combine two futures with a zipper, with an explicit destructor.
+ *
+ * Identical to UfsrvFutureZip except that the value the zipper returns is released
+ * with @p free_value when the result future is released, instead of `free`. Use it
+ * whenever the zipper returns anything that is not a plain `malloc` block. Passing
+ * NULL means the value is never released by the library.
+ *
+ * @param[in,out] future_a    First input future.
+ * @param[in,out] future_b    Second input future.
+ * @param[in]     zipper      Combine function (non-NULL).
+ * @param[in]     context_ptr Opaque context passed to the zipper.
+ * @param[in]     free_value  Releases the combined value; may be NULL.
+ * @return A new future, or NULL on invalid arguments / allocation failure.
+ */
+PUBLIC_API UfsrvFuture *UfsrvFutureZipEx(UfsrvFuture *future_a, UfsrvFuture *future_b,
+                                         UfsrvFutureZipCallback zipper, void *context_ptr,
+                                         void (*free_value)(void *value_ptr));
 
 /*!
  * @brief Complete with the first future to finish.

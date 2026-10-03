@@ -47,13 +47,14 @@ struct UfsrvWaiter {
 /*! A future: result + continuation and waiter stacks + a refcount. */
 struct UfsrvFuture {
     _Atomic(bool)               is_completed;   /*!< One-shot completion guard (promise vs cancel). */
+    _Atomic(bool)               is_consumed;    /*!< One-shot guard for a move operator taking the value. */
     _Atomic(int)                state;          /*!< PENDING/READY publication. */
     UfsrvFutureResult           result;
     LocklessTreiberStack       *continuations;   /*!< Opaque continuation stack. */
     LocklessTreiberStack       *waiters;         /*!< Opaque waiter stack. */
     _Atomic(int)                refcount;
-    UfsrvCancellationToken     *cancel_token;   /*!< Attached token (borrowed; caller-owned). */
-    void                       *cancel_handle;  /*!< Registered cancel callback (NULL if none). */
+    _Atomic(UfsrvCancellationToken *) cancel_token;   /*!< Attached token (borrowed; caller-owned). */
+    _Atomic(void *)                   cancel_handle;  /*!< Registered cancel callback (NULL if none). */
 };
 
 /*! A promise: one-shot producer holding a reference to its future. */

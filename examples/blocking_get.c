@@ -42,6 +42,7 @@ sComputeEntry(void)
         *result = ctx->base * 2;
     }
     UfsrvPromiseSetValue(ctx->promise, result, free);
+    UfsrvPromiseDestroy(ctx->promise);
     free(ctx);
 
     UfsrvCoroutineExit();
