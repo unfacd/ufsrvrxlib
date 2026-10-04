@@ -13,8 +13,8 @@
 
 #define UFSRVRXLIB_MAJOR 0
 #define UFSRVRXLIB_MINOR 2
-#define UFSRVRXLIB_PATCH 0
-#define UFSRVRXLIB_INTERNAL 3
+#define UFSRVRXLIB_PATCH 1
+#define UFSRVRXLIB_INTERNAL 0
 
 /*!
  * @brief Full dotted version string (e.g. "0.1.0").
