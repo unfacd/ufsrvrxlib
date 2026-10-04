@@ -14,3 +14,19 @@ SHA256: 60008a4ec1d2d2018cc8d692b7499d1d535ec873d6be7639e9706aab30522542
 SHA512: 01130414aa4abdc301f7d6c10a8638f209c0cacef062b61fdb02b13900e707fd88b3adea79c2420dc1c5e9c73eb48eb5aa91edaa70ede00577900d3a9bc25900
 Description: ufsrv reactive-extensions library (coroutines, futures, scheduler)
 
+Package: ufsrvrxlib-dev
+Architecture: amd64
+Version: 0.2.1
+Priority: optional
+Section: libs
+Maintainer: unfacd works
+Installed-Size: 196
+Depends: libc6, uflib-dev
+Filename: pool/main/u/ufsrvrxlib-dev/ufsrvrxlib-dev_0.2.1_amd64.deb
+Size: 38604
+MD5sum: c37ccb13b33504e9489115b92a626cc5
+SHA1: 070ff5ab5d654087924ee0f8e338eed1f8750d49
+SHA256: 393f4a29101dce4db2b43cc3d8347d479a5e452606dee57c15efec97753d7aae
+SHA512: ada9fce028d7ee6c51386882b03d05e4e262899789f7a569bfbc391d60a0145625ccc385b2b203556f157ecf403df1d6b7638e0aadedfc287aa3d82804892832
+Description: ufsrv reactive-extensions library (coroutines, futures, scheduler)
+

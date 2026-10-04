@@ -69,7 +69,7 @@
   | sudo tee /etc/apt/keyrings/unfacd-apt.asc &gt;/dev/null</code></pre>
 
     <p>Then the repository:</p>
-<pre><code># /etc/apt/sources.list.d/unfacd.sources
+<pre><code># /etc/apt/sources.list.d/unfacd-ufsrvrxlib.sources
 Types: deb
 URIs: https://unfacd.github.io/ufsrvrxlib
 Suites: stable
@@ -85,9 +85,9 @@ sudo apt install ufsrvrxlib-dev</code></pre>
     </p>
 
     <p class="note">
-      <code>ufsrvrxlib-dev</code> depends on <code>uflib-dev</code>, which is served from
-      <a href="https://unfacd.github.io/uflib">unfacd.github.io/uflib</a>. Add that repository
-      too, or apt will refuse the install with an unsatisfied dependency.
+      <code>ufsrvrxlib-dev</code> depends on <code>uflib-dev</code>, served from
+      <a href="https://unfacd.github.io/uflib">unfacd.github.io/uflib</a>. The installer
+      configures that repository as well, and apt resolves the dependency itself.
     </p>
   </section>
 

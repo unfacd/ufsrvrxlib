@@ -4,7 +4,9 @@ set -euo pipefail
 REPO_URL="https://unfacd.github.io/ufsrvrxlib"
 KEY_URL="$REPO_URL/apt-unfacd.pub.asc"
 KEYRING="/etc/apt/keyrings/unfacd-apt.asc"
-SOURCES="/etc/apt/sources.list.d/unfacd.sources"
+SOURCES="/etc/apt/sources.list.d/unfacd-ufsrvrxlib.sources"
+UFLIB_SOURCES="/etc/apt/sources.list.d/unfacd-uflib.sources"
+UFLIB_URL="https://unfacd.github.io/uflib"
 PACKAGE="${PACKAGE:-ufsrvrxlib-dev}"
 SUITE="${SUITE:-stable}"
 
@@ -53,7 +55,7 @@ install -d -m 0755 /etc/apt/keyrings
 install -m 0644 "$KEY_TMP" "$KEYRING"
 echo "       $KEYRING"
 
-step 3/4 "Adding the repository"
+step 3/4 "Adding the repositories"
 cat > "$SOURCES" <<EOF
 Types: deb
 URIs: $REPO_URL
@@ -62,6 +64,15 @@ Components: main
 Signed-By: $KEYRING
 EOF
 echo "       $SOURCES"
+
+cat > "$UFLIB_SOURCES" <<EOF
+Types: deb
+URIs: $UFLIB_URL
+Suites: $SUITE
+Components: main
+Signed-By: $KEYRING
+EOF
+echo "       $UFLIB_SOURCES"
 
 step 4/4 "Installing $PACKAGE"
 DEBIAN_FRONTEND=noninteractive apt-get update -qq </dev/null \
@@ -79,7 +90,7 @@ fi
 
 echo "=== Done — $PACKAGE $INSTALLED ==="
 echo ""
-echo "Headers:    /usr/include/ufsrvrxlib/"
+echo "Headers:    /usr/local/include/ufsrvrxlib/"
 echo "pkg-config: pkg-config --cflags --libs ufsrvrxlib"
 echo "CMake:      find_package(ufsrvrxlib REQUIRED)  ->  target_link_libraries(app PRIVATE ufsrvrxlib::ufsrvrxlib)"
 echo "Man page:   man 7 ufsrvrxlib"
