@@ -108,6 +108,22 @@ downstream.
 - Multi-core parallelism for CPU-bound work — coroutines switch only where they yield.
 - A central dispatcher thread, deliberately: the submitting thread picks the target.
 
+## Install
+
+Debian and Ubuntu hosts (amd64) can install the packaged library from the signed
+apt repository:
+
+```sh
+curl -fsSL https://unfacd.github.io/ufsrvrxlib/install.sh | sudo bash
+```
+
+That establishes the signing key, points apt at `https://unfacd.github.io/ufsrvrxlib`
+and installs `ufsrvrxlib-dev` — headers, the static libraries, the pkg-config file
+and the man page. The package depends on `uflib-dev`, served from
+<https://unfacd.github.io/uflib>; the installer configures that repository too, and
+apt resolves the dependency itself. The landing page at that first URL carries the
+manual steps and the key fingerprints.
+
 ## Build and link
 
 | | |
